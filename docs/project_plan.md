@@ -446,15 +446,20 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    pub fn new(config: Config, storage: Storage) -> Result<Self>;
+    // `root: PathBuf` is an explicit 3rd argument (extends the original `new(config, storage)`):
+    // discovery walks `config.index_paths` resolved against `root`, defaulting to `root` itself
+    // when `index_paths` is empty. The integration/e2e tests (M5.2+) must point the indexer at a
+    // `TempDir`, and discovery's `discover_files(config, root)` already takes an explicit root, so
+    // the root is passed in rather than derived from cwd. Returns `Result<Indexer, IndexError>`.
+    pub fn new(config: Config, storage: Storage, root: PathBuf) -> Result<Self>;
     
-    // Full re-index
+    // Full re-index. `Result<IndexStats, IndexError>`.
     pub fn index_all(&mut self) -> Result<IndexStats>;
     
-    // Incremental update for specific files
+    // Incremental update for specific files (M5.3). `Result<IndexStats, IndexError>`.
     pub fn update_files(&mut self, files: &[PathBuf]) -> Result<IndexStats>;
     
-    // Internal: discover all files in index_paths
+    // Internal: discover all files in index_paths (free fn `discover_files(config, root)` in M5.1)
     fn discover_files(&self) -> Result<Vec<PathBuf>>;
     
     // Internal: detect changed files via hash comparison

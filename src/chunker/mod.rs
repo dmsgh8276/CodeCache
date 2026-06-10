@@ -84,10 +84,16 @@ pub fn chunk(tree: &Tree, source: &str, lang: Language) -> Result<Vec<Chunk>> {
     let file_docstring = module_docstring(root, source);
     let imports = collect_imports(root, source);
 
+    // One walk collects every bare-identifier `call` (its span + callee name) in DFS order; each
+    // chunk then takes the calls contained in its span. This is O(nodes + chunks·calls) instead of
+    // the previous O(chunks × tree_nodes) per-chunk re-walk, while preserving the observable output
+    // (callees deduped in first-seen DFS order within each chunk span).
+    let calls = collect_calls(root, source);
+
     for c in &mut chunks {
         c.file_docstring = file_docstring.clone();
         c.imports = imports.clone();
-        c.cross_references = call_names_in_span(root, source, c.start_byte, c.end_byte);
+        c.cross_references = call_names_in_span(&calls, c.start_byte, c.end_byte);
     }
 
     chunks.sort_by_key(|c| c.start_byte);
@@ -153,19 +159,29 @@ fn collect_imports(root: Node, source: &str) -> Vec<String> {
     imports
 }
 
-/// Best-effort cross-references: the function names of `call` expressions whose call site lies
-/// within `[start, end)`. Deduplicated, in first-seen (stable) order. Walks the tree once via a
-/// [`tree_sitter::TreeCursor`] (no recursion).
-fn call_names_in_span(root: Node, source: &str, start: usize, end: usize) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
+/// A bare-identifier `call` site: the byte span of the `call` node plus its callee name. Collected
+/// once per tree by [`collect_calls`] (DFS order) so cross-reference enrichment is a single walk.
+struct CallSite {
+    start: usize,
+    end: usize,
+    name: String,
+}
+
+/// Walk the tree **once** via a [`tree_sitter::TreeCursor`], collecting every `call` expression
+/// with a bare `identifier` callee as a [`CallSite`] in DFS (document) order. Attribute calls like
+/// `os.urandom(...)` are skipped (their callee is not a plain `identifier`).
+fn collect_calls(root: Node, source: &str) -> Vec<CallSite> {
+    let mut calls: Vec<CallSite> = Vec::new();
     let mut cursor = root.walk();
     loop {
         let node = cursor.node();
-        if node.kind() == "call" && node.start_byte() >= start && node.end_byte() <= end {
+        if node.kind() == "call" {
             if let Some(name) = call_function_name(node, source) {
-                if !names.iter().any(|n| n == name) {
-                    names.push(name.to_string());
-                }
+                calls.push(CallSite {
+                    start: node.start_byte(),
+                    end: node.end_byte(),
+                    name: name.to_string(),
+                });
             }
         }
 
@@ -177,10 +193,23 @@ fn call_names_in_span(root: Node, source: &str, start: usize, end: usize) -> Vec
                 break;
             }
             if !cursor.goto_parent() {
-                return names;
+                return calls;
             }
         }
     }
+}
+
+/// Best-effort cross-references for the chunk span `[start, end)`: the callee names of the
+/// pre-collected [`CallSite`]s contained in the span, deduplicated in first-seen (DFS) order. The
+/// `calls` slice is already in DFS order, so this preserves the original observable ordering.
+fn call_names_in_span(calls: &[CallSite], start: usize, end: usize) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for call in calls {
+        if call.start >= start && call.end <= end && !names.iter().any(|n| n == &call.name) {
+            names.push(call.name.clone());
+        }
+    }
+    names
 }
 
 /// The simple identifier a `call` invokes, when the callee is a plain `identifier` (e.g.

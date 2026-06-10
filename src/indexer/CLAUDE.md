@@ -27,11 +27,33 @@ incremental idempotency; modify N ⇒ exactly N re-indexed; delete removes chunk
 - `mod.rs` — `IndexError { Io { path, source }, Glob { pattern, source } }`, typed (`impl
   std::error::Error` + `source()`), no reachable `unwrap()/expect()/panic!`.
 
-## Planned layout (M5.2+)
-- `mod.rs` — `Indexer` facade (§3.2.4): `new`, `index_all`, `update_files`, private
-  `detect_changed_files`; `IndexStats { files_processed, chunks_indexed, duration_ms }`.
-- `pipeline.rs` — per-file parse→chunk→hash→store + change detection (§5.2); per-file error
-  isolation (D2: degrade-and-continue); deletion reconciliation vs `files_metadata`.
+## Shipped API (M5.2 — full index `index_all`)
+- `mod.rs` — `Indexer` facade:
+  - `Indexer::new(config: Config, storage: Storage, root: PathBuf) -> Result<Indexer, IndexError>`
+    — `root` is an explicit 3rd arg (extends §3.2.4's `new(config, storage)`; plan §3.2.4 updated
+    to match). Builds the reusable Tree-sitter `Parser` once.
+  - `Indexer::index_all(&mut self) -> Result<IndexStats, IndexError>` — §5.1: `discover_files` →
+    per file `pipeline::index_file` → accumulate `IndexStats` → `set_index_state("total_files"/
+    "total_chunks")` (decimal strings) → `duration_ms` via `std::time::Instant`.
+  - `IndexStats { files_processed, chunks_indexed, duration_ms }` (`Copy`, `Default`).
+- `pipeline.rs` — `index_file(parser, storage, path) -> Result<usize, IndexError>`: §5.1 step
+  3a–3e (hash → read content+metadata → `detect_language` → `parse_file` → `chunker::chunk` →
+  stamp `file_path` on chunks → `insert_chunks` → build `FileMeta{content_hash, mtime, file_size,
+  language, chunk_count}` → `update_file_hash`). Returns chunk count.
+- `IndexError` extended with per-file/store variants: `File{path,source}`, `Hash`, `Parser`,
+  `Chunker`, `Storage` (in addition to M5.1 `Io`/`Glob`). Typed, `impl Error` + `source()` chain.
+
+### D2 per-file isolation
+`index_all` wraps each `index_file` call in a `match`: on `Ok(n)` it adds to the stats; on `Err`
+it counts the file as skipped and continues. The batch never aborts on one bad file — `index_all`
+returns `Ok`. The chunker already degrades a malformed tree internally (heuristic fallback / empty
+via `error_rate`), so a syntactically broken file usually returns `Ok(0..)`; any residual per-file
+error (unreadable, store failure) is still caught here. Only non-isolatable failures (discovery,
+the `index_state` totals write) propagate as `Err`.
+
+## Planned layout (M5.3+)
+- `pipeline.rs` — change detection (§5.2): `detect_changed_files` via `compute_file_hash` vs
+  `get_file_hash`; `update_files` for an explicit list; deletion reconciliation vs `files_metadata`.
 - Slices M5.1–M5.4 + execution sequence: [`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).
 
 ## Decisions / seams
@@ -40,10 +62,14 @@ incremental idempotency; modify N ⇒ exactly N re-indexed; delete removes chunk
   representation drops it (round-trip reconstructs `false`, unchanged from M4). No M5 scenario
   observes it; persistence is driven by an M7 formatter/CLI RED test (storage adds an UNINDEXED
   column + version migration). See BRIEF §Follow-ups (b).
-- **M4 cross-ref re-walk fix** rides in M5.2: replace `chunker::call_names_in_span`'s per-chunk
-  whole-tree walk with single-pass bucketing of `call` nodes by chunk span.
+- **M4 cross-ref re-walk fix** — DONE in M5.2: `chunker` now collects every bare-identifier `call`
+  in a single DFS walk (`collect_calls`) into a `Vec<CallSite>`, then each chunk's
+  `call_names_in_span` filters that pre-collected slice by span (O(nodes + chunks·calls) vs the old
+  O(chunks × tree_nodes)). Public `chunk()` signature + observable output (deduped, first-seen DFS
+  order) unchanged; M4 chunker tests (10 + 3 proptest) stay green.
 
 ## Status
-**M5.1: GREEN (2026-06-10)** — discovery + language detection shipped; 5/5 `indexer_tests` pass,
-all four gates clean (Rust 1.85). M5.2–M5.4 (full/incremental index + e2e) pending. Brief:
-[`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).
+**M5.2: GREEN (2026-06-10)** — full index (`index_all`) + per-file `pipeline.rs` shipped; D2
+isolation + chunker single-pass cross-ref refactor landed. 10/10 `indexer_tests` (5 M5.1 + 5
+M5.2), 86 tests total, all four gates clean (Rust 1.85). M5.3–M5.4 (incremental/delete + e2e)
+pending. Brief: [`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).

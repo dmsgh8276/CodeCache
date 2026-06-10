@@ -60,12 +60,22 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
 
 ## Phase 5 — indexer (M5) · plan: [plans/M5-indexer.md](plans/M5-indexer.md) · brief: [.claude/briefs/BRIEF-M5-indexer.md](../.claude/briefs/BRIEF-M5-indexer.md)
 - Sliced M5.1–M5.4 (one commit per slice recommended); execution sequence + gate commands in the brief.
-- [ ] **M5.1 discovery + language detection** — RED (5 tests: gitignore, config ignore_patterns,
+- [x] **M5.1 discovery + language detection** — RED (5 tests: gitignore, config ignore_patterns,
       language filter, ext→language, non-source skipped) → test-lead; `discovery.rs` via
-      `ignore::WalkBuilder` → engineering-lead.
-- [ ] **M5.2 full index (`index_all`)** — RED (chunk count, files_metadata per file, index_state
-      totals, IndexStats, D2 malformed-file-does-not-abort) → test-lead; §5.1 pipeline → engineering-lead;
-      cold-index bench skeleton → perf. (Carries the M4 cross-ref re-walk fix below.)
+      `ignore::WalkBuilder` (`.require_git(false)`; config patterns via anchored Gitignore matcher)
+      → engineering-lead. Reviewer APPROVED. **DONE 2026-06-10** (commit `ef36942`).
+- [x] **M5.2 full index (`index_all`)** — RED (chunk count, files_metadata per file, index_state
+      totals, IndexStats, D2 malformed-file-does-not-abort) → test-lead; §5.1 pipeline (`pipeline.rs` +
+      `Indexer{config,storage,root,parser}`; D2 per-file isolation; index_state `total_files`/`total_chunks`)
+      → engineering-lead; cold-index bench skeleton (`benches/indexing.rs`, baseline ~1.1s/500 LOC) → perf.
+      Carried the M4 cross-ref re-walk fix (now single-pass; see below). `project_plan.md` §3.2.4 updated
+      to add `Indexer::new(.., root)`. Reviewer APPROVED. **DONE 2026-06-10.**
+  - [ ] **Follow-up (M5.2 review, non-blocking):** D2 swallows per-file errors silently and `IndexStats`
+        has no skipped counter — add `files_skipped` (and/or a `log::warn!` of path+error) so a run where
+        many files fail isn't indistinguishable from a clean run. → engineering-lead
+  - [ ] **Follow-up (M5.2 review, non-blocking):** cross-reference enrichment is under-tested — add a RED
+        test for nested-function call attribution + duplicate-call dedup (first-seen) to lock the contract
+        independently of the single-pass impl. → test-lead
 - [ ] **M5.3 incremental + idempotency + delete** — RED (no-writes re-index, modify-one, exact-N,
       new-file, deleted-file-cleared) → test-lead; §5.2 change detection + deletion reconciliation → engineering-lead.
 - [ ] **M5.4 e2e init → index** — RED (`tests/e2e_index.rs` + `tests/fixtures/repo/**`) → test-lead;
@@ -76,11 +86,12 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
       chunker's `is_heuristic` through in-memory; only the stored representation drops it (unchanged
       from M4). M7 formatter/CLI drives persistence via a RED test (storage adds an UNINDEXED column +
       `index_state.version` migration). Recorded in BRIEF-M5-indexer.md §Follow-ups (b) and `src/chunker/CLAUDE.md`.
-- [ ] **Perf follow-up (from M4 review):** `chunker::call_names_in_span` re-walks the whole tree
-      per chunk → O(chunks × tree_nodes) cross-reference enrichment, a deviation from the M4 plan's
-      "single-pass, no per-chunk re-query" budget. Correctness unaffected (no M4 budget breached).
-      Bucket all `call` nodes in one walk by containing span (O(nodes + chunks·log)); `perf` validates
-      against the §5.4 cold-index budget when M5 wires the pipeline. → engineering-lead + perf
+- [x] **Perf follow-up (from M4 review) — DONE in M5.2:** `chunker::call_names_in_span` previously
+      re-walked the whole tree per chunk → O(chunks × tree_nodes). Now a single DFS buckets all `call`
+      nodes (`collect_calls -> Vec<CallSite>`); `call_names_in_span` filters that slice by span
+      (O(nodes + chunks·calls)). Public `chunk()` signature + observable output unchanged; M4 chunker
+      tests gate the refactor. Cold-index bench baseline recorded (perf flags per-file transaction
+      overhead for M10 profiling — naive extrapolation over the 10K-LOC budget).
 
 ## Phase 6 — retriever (M6) · plan: [plans/M6-retriever.md](plans/M6-retriever.md)
 - [ ] RED tests: BM25 ranking determinism; token-budget packing; empty/no-match → test-lead

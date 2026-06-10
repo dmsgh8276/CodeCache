@@ -58,7 +58,11 @@ this document is the source for "what scenarios must a slice cover" referenced b
 
 ### indexer
 - Discovery honors `.gitignore` + extra ignore patterns; respects configured languages.
-- Full index of a fixture repo populates storage correctly.
+- Full index of a fixture repo populates storage correctly: chunks searchable, per-file
+  `files_metadata` written (content_hash, file_size, language, chunk_count), and `index_state`
+  totals (`total_files`/`total_chunks`) updated (§5.1 step 4); `IndexStats` counts + `duration_ms`.
+- Malformed file in a full index does not abort the batch (**D2**): `index_all` returns `Ok`, the
+  bad file is skipped/heuristically chunked, and sibling valid files are still indexed.
 - Incremental: re-index unchanged ⇒ no writes (idempotent); modify N files ⇒ exactly those re-indexed.
 - Deleted file ⇒ its chunks removed.
 

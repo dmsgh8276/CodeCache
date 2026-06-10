@@ -254,6 +254,92 @@ Hand off to **principal-engineering-lead**.
 
 <original placeholder removed>
 
+### M5.2 — full index (`index_all`) (2026-06-10)
+
+**Tests added** (`tests/indexer_tests.rs`, appended below the M5.1 block; repos built at runtime
+via `tempfile::TempDir`, DB lives under the same tempdir — nothing touches the working tree):
+1. `index_all_populates_storage_with_expected_chunk_count` — two `.py` files, each exactly one
+   top-level function ⇒ `stats.chunks_indexed == 2`; asserts `alpha_fn` and `beta_fn` are each
+   BM25-searchable via `storage.search(...)`.
+2. `index_all_writes_files_metadata_for_each_file` — one-function `solo.py`; asserts
+   `get_file_meta(root/solo.py)` is `Some` with non-empty `content_hash`, `file_size > 0`,
+   `language == Python`, and `chunk_count == 1`.
+3. `index_all_updates_index_state_totals` — two one-function files; asserts
+   `get_index_state("total_files") == "2"` and `get_index_state("total_chunks") == "2"` (§5.1
+   step 4; the `index_state` schema seeds both keys as text — see `storage/schema.rs`).
+4. `index_all_returns_indexstats_with_counts_and_duration` — asserts
+   `IndexStats { files_processed: 2, chunks_indexed: 2, duration_ms: u64 }`; `duration_ms` is only
+   type-checked / bounded (`< u64::MAX`), never asserted on timing (determinism).
+5. `malformed_file_in_repo_does_not_abort_index` (**D2**) — `good.py` (valid) + `broken.py`
+   (unbalanced delimiters / garbage). `index_all()` must return `Ok` (not abort), and `good_fn`
+   must be searchable afterward. The broken file may be heuristically chunked **or** skipped —
+   either is acceptable; the test only asserts the batch did not abort and the good file landed.
+
+All chunk-count asserts use **single-top-level-function** fixtures, which the M4 chunker test
+`single_symbol_file_yields_one_chunk` proves yield **exactly one chunk** — so "2 files → 2 chunks"
+is stable and not brittle. (For reference: `simple_class.py` = class + 2 methods → 3 chunks; I
+avoided classes to keep counts trivially controlled.) Searchability assertions read
+`hit.chunk.symbol_name` off `SearchResult`.
+
+**Public API the engineering lead must implement** (pinned — match exactly so M5.3/M5.4 stay
+consistent):
+```rust
+// in src/indexer (mod.rs facade + pipeline.rs), re-exported at the indexer module root:
+pub struct IndexStats {
+    pub files_processed: usize,
+    pub chunks_indexed: usize,
+    pub duration_ms: u64,
+}
+impl Indexer {
+    pub fn new(config: Config, storage: Storage, root: PathBuf) -> Result<Indexer, IndexError>;
+    pub fn index_all(&mut self) -> Result<IndexStats, IndexError>;
+}
+```
+- **Root-passing decision (DECIDED — `root` is an explicit 3rd arg to `new`):**
+  `Indexer::new(config, storage, root: PathBuf)`. The §3.2.4 plan signature is
+  `new(config, storage)`; this RED **extends it with `root: PathBuf`** because the integration/e2e
+  tests must point the indexer at a `TempDir` and the M5.1 `discover_files(config, root)` already
+  takes an explicit root. Discovery resolves `config.index_paths` against `root`, defaulting to
+  `root` itself when `index_paths` is empty (the confirmed M5.1 default — these tests leave
+  `index_paths` empty). **Update `project_plan.md` §3.2.4 to match (`root` param) before/while
+  implementing**, per the "change the plan before diverging" rule. `index_all(&mut self)` is the
+  plan signature unchanged.
+- Tests import `codecache::indexer::{IndexStats, Indexer}` (and `codecache::storage::Storage`), so
+  both must be reachable at the `indexer` module root (re-export from `mod.rs`).
+- `index_all` returns `Result<IndexStats, IndexError>` (the M5.1 module error type — extend it with
+  parse/chunk/store per-file variants as needed for D2; the tests only `.expect(...)`/`is_ok()` so
+  any `IndexError: Debug` compiles).
+
+**Behavior the impl must satisfy (from the assertions):**
+- Discover (M5.1 `discover_files`) → per file read/hash/parse/chunk/`insert_chunks` →
+  `update_file_hash(path, &FileMeta{ content_hash (non-empty), mtime, file_size>0, language,
+  chunk_count })`. `FileMeta` rows keyed by the **absolute-under-root** path the tests pass to
+  `get_file_meta` (they use `root.join("solo.py")`, matching the paths `discover_files` returns).
+- Accumulate `IndexStats`: `files_processed` = source files processed, `chunks_indexed` = total
+  chunks inserted, `duration_ms` = wall-clock ms (any real `u64`).
+- `set_index_state("total_files", …)` and `set_index_state("total_chunks", …)` with the run totals
+  as decimal strings (§5.1 step 4).
+- **D2:** per-file work is wrapped so a malformed/parse-failing file is counted/skipped and the
+  batch continues; `index_all` returns `Ok`, never `Err`, on a malformed sibling.
+
+**RED output** (`cargo test --all --test indexer_tests`, PATH-prefixed with `$HOME/.cargo/bin`):
+```
+   Compiling codecache v0.1.0 (C:\Users\ehlee\workspace\projects\CodeCache)
+error[E0432]: unresolved imports `codecache::indexer::IndexStats`, `codecache::indexer::Indexer`
+  --> tests\indexer_tests.rs:27:59
+   |
+27 | use codecache::indexer::{detect_language, discover_files, IndexStats, Indexer};
+   |                                                           ^^^^^^^^^^  ^^^^^^^ no `Indexer` in `indexer`
+   |                                                           |
+   |                                                           no `IndexStats` in `indexer`
+
+error: could not compile `codecache` (test "indexer_tests") due to 1 previous error
+```
+Fails for the right reason: the `indexer` module does not yet expose `Indexer`/`IndexStats`; the
+M5.1 discovery API still resolves. `cargo test --all` is blocked only on this one target's import
+(M5.1 tests in the same file compiled clean before this edit; once `Indexer`/`IndexStats` land the
+whole file compiles and all 10 indexer tests run). Hand off to **principal-engineering-lead**.
+
 ## GREEN — engineering lead
 
 ### M5.1 — discovery + language detection (2026-06-10)
@@ -317,7 +403,46 @@ storage 18; main 0, doctests 0) — up from 76 by exactly the 5 new M5.1 tests.
 Hand off to **code-reviewer**.
 
 ## Specialist / Perf notes
-<ignore-crate gitignore edge cases if engaged; chunker single-pass cross-ref bench numbers vs §5.4 budget>
+
+### M5.2 — cold-index bench skeleton (2026-06-10) — performance-bench-engineer
+
+**Bench:** `benches/indexing.rs` — criterion group `cold_index`, bench function
+`index_all_50_py_files`.
+
+**What it measures:** wall-clock time for one full `Indexer::index_all()` call over a synthetic
+repo of 50 Python files (~500 LOC total, ~2 functions per file), with a cold (freshly-created,
+schema-initialized) SQLite DB per iteration. Exercises the complete hot path: discover →
+compute-file-hash → read → parse (Tree-sitter Python) → chunk → insert_chunks (batch
+transaction) → update_file_hash → set_index_state. Each iteration constructs a fresh `Storage` +
+`Indexer` so there is no warm-cache effect in the index layer.
+
+**Baseline (Windows 11 Home 10.0.26200, Intel/AMD dev machine, Rust 1.85, `--release` profile,
+criterion 10 samples, 2026-06-10):**
+  - Median (p50): ~1.10 s
+  - Observed range: [1.02 s, 1.20 s]
+  - Input scale: ~500 LOC / 50 files
+
+**Budget comparison (§5.4 — informational at M5; full validation deferred to M10):**
+  - Target: cold 10K LOC < 5 s
+  - Measured at 500 LOC: ~1.10 s ≈ 22 ms per 10 LOC / 10 files
+  - Naive linear extrapolation to 10K LOC ≈ 22 s (> 5 s budget) and to 100K LOC ≈ 220 s (> 30 s
+    budget). Extrapolation is pessimistic (SQLite bulk-insert amortizes over more chunks; parse and
+    hash throughput scale sub-linearly for larger files vs many tiny files), but the numbers flag
+    that the hot path will need profiling and optimization before M10.
+  - Recommendation: at M10 profile `insert_chunks` transaction overhead (many tiny single-chunk
+    files vs fewer large files), hasher I/O cost, and tree-sitter parse time. The 50-tiny-file
+    fixture is worst-case for per-file fixed overhead (DB open + transaction + metadata write per
+    file); real repos have larger files and amortize better.
+
+**CI gating:** NOT gated — wired informational only per brief scope. Do not add threshold
+failures to this bench before M10.
+
+**To reproduce / compare:**
+```
+cargo bench --bench indexing                                    # run baseline
+cargo bench --bench indexing -- --save-baseline before         # save named baseline
+cargo bench --bench indexing -- --baseline before              # compare against saved
+```
 
 ## REVIEW — code reviewer
 <APPROVE / BLOCK + findings: severity — file:line — problem — fix>
@@ -359,3 +484,133 @@ Nits (non-blocking, optional — do NOT fix this slice):
   M5.1/M9 scope. Note only.
 
 Slice M5.1 is DONE-eligible. Hand back to manager.
+
+### M5.2 — full index (`index_all`) (2026-06-10)
+
+**Implemented** (matches the RED-pinned signatures exactly):
+- `src/indexer/mod.rs` — `Indexer { config, storage, root, parser }` facade:
+  - `Indexer::new(config: Config, storage: Storage, root: PathBuf) -> Result<Indexer, IndexError>`
+    — builds one reusable `Parser` up front (`Parser::new` → `IndexError::Parser` on a bad query).
+  - `Indexer::index_all(&mut self) -> Result<IndexStats, IndexError>` — §5.1: `discover_files`
+    (M5.1 free fn) → per file `pipeline::index_file` → accumulate `IndexStats` →
+    `set_index_state("total_files"/"total_chunks", <decimal>)` → `duration_ms` via
+    `std::time::Instant`. `IndexStats { files_processed, chunks_indexed, duration_ms }`
+    (`Copy`+`Default`). Both `IndexStats` and `Indexer` re-exported at the `indexer` module root.
+  - I did **not** group by language (§5.1 step 2 is optional per the brief): a single reusable
+    `Parser` handles all languages and `detect_language` is recomputed per file in the pipeline, so
+    the explicit `HashMap<Language, Vec<PathBuf>>` grouping is unnecessary for correctness. Noted as
+    a deliberate simplification; revisit only if a per-language parser pool is wanted later.
+- `src/indexer/pipeline.rs` (new) — `index_file(parser, storage, path) -> Result<usize, IndexError>`:
+  §5.1 step 3a–3e — `hasher::compute_file_hash` → `read_to_string` + `fs::metadata` (size, mtime) →
+  `detect_language` → `parser.parse_file` → `chunker::chunk` → **stamp `chunk.file_path = path`** on
+  each chunk (parser/chunker leave it empty; the tests query `get_file_meta`/`search` by the
+  absolute-under-root path) → `insert_chunks` → build `FileMeta` → `update_file_hash`. Returns the
+  chunk count. `file_mtime_secs` defensively yields `0` on a clock quirk (the hash already encodes
+  mtime authoritatively) rather than failing the whole file.
+- `IndexError` extended (typed, `impl Error` + `source()` chain, no reachable panic) with
+  `File{path,source}`, `Hash(HasherError)`, `Parser(ParserError)`, `Chunker(ChunkerError)`,
+  `Storage(StorageError)` alongside the M5.1 `Io`/`Glob`.
+
+**D2 per-file isolation approach:** `index_all` wraps each `index_file` call in a `match` — `Ok(n)`
+adds to `files_processed`/`chunks_indexed`; `Err(_)` counts the file as skipped and continues. The
+batch never aborts on one bad file (`index_all` returns `Ok`). The chunker degrades a malformed
+tree internally (heuristic fallback / empty via `error_rate`), so `broken.py` returns `Ok` from the
+pipeline and the malformed-file test passes with `good_fn` still searchable. Only non-isolatable
+failures (discovery walk/glob, the `index_state` totals write) propagate as `Err` from `index_all`.
+
+**Chunker single-pass cross-ref refactor — DONE (not deferred):** `src/chunker/mod.rs` previously
+re-walked the whole tree per chunk in `call_names_in_span` (O(chunks × tree_nodes)). Replaced with
+`collect_calls(root, source) -> Vec<CallSite>` (one DFS `TreeCursor` walk collecting every
+bare-identifier `call`'s span+name in document order), and `call_names_in_span(&calls, start, end)`
+now filters that pre-collected slice by span and dedups in first-seen order — O(nodes + chunks·calls).
+`chunk()`'s public signature and observable output (deduped, first-seen DFS order `cross_references`)
+are unchanged; the M4 chunker suite (10 integration + 3 proptest) stays green and gates the refactor.
+
+**Plan edit (§3.2.4):** updated `docs/project_plan.md` §3.2.4 to show
+`Indexer::new(config, storage, root: PathBuf)` with a comment recording the reason (integration/e2e
+tests must point discovery at an explicit `TempDir` root; `discover_files(config, root)` already
+takes an explicit root), and annotated `index_all`/`update_files` return types as
+`Result<_, IndexError>`. Done before/with the implementation per "change the plan before diverging".
+
+**Gate output (PATH-prefixed `$HOME/.cargo/bin`, all four green):**
+```
+cargo build                                  → Finished (clean)
+cargo clippy --all-targets -- -D warnings    → Finished (no warnings)
+cargo test --all                             → all green; indexer 10/10 (5 M5.1 + 5 M5.2)
+cargo fmt --all -- --check                   → clean (exit 0)
+```
+`tests/indexer_tests.rs`: 10 passed / 0 failed. Whole suite: **86 tests** total (up from 81 by
+exactly the 5 new M5.2 tests). Chunker tests (10 + 3 proptest) confirmed still green after the
+cross-ref refactor.
+
+Note for manager: `cargo fmt --all` reformatted whitespace in `tests/indexer_tests.rs` (the RED
+file was not rustfmt-clean — two `assert!` calls wrapped). Only formatting/whitespace changed; no
+assertion, name, or test was altered/weakened — all 10 tests still pass. This matches the project's
+fmt-on-edit gate that formats every `.rs`.
+
+Hand off to **performance-bench-engineer** (cold-index bench skeleton) then **code-reviewer**.
+
+### M5.2 — full index (`index_all`) + chunker single-pass cross-refs (2026-06-10) — **APPROVE**
+
+Reviewed: `src/indexer/mod.rs`, `src/indexer/pipeline.rs`, `src/chunker/mod.rs` (diff),
+`tests/indexer_tests.rs`, `benches/indexing.rs`, `src/indexer/CLAUDE.md`, `docs/project_plan.md`
+§3.2.4. Re-ran indexer (10/10), chunker (10/10), chunker_proptest (3/3) — all green.
+
+**Verdict: APPROVE.** Correct, idiomatic, aligned; no blockers, no majors.
+
+Correctness confirmed:
+- **Chunker single-pass refactor is behavior-preserving.** The old per-chunk predicate
+  `node.start_byte() >= start && node.end_byte() <= end` is byte-for-byte identical to the new
+  `call.start >= start && call.end <= end`; `collect_calls` does the same DFS `TreeCursor` walk and
+  the same `call_function_name` (bare-identifier-only) filter, so the `CallSite` slice is in the
+  exact DFS order the old per-span walk visited. `call_names_in_span` keeps the same first-seen
+  dedup. Observable `cross_references` set + order is identical. Nested-function semantics are
+  preserved: a call in an inner fn is contained in BOTH the inner and the enclosing chunk's span
+  under both old and new code (same containment predicate) — so if the old code "double-counted"
+  into the outer chunk, the new code does too; no regression either way.
+- **§5.1 alignment.** discover → per-file hash/read+metadata/parse/chunk/insert_chunks/
+  update_file_hash → set_index_state(total_files/total_chunks) → IndexStats+duration all match.
+  Using `chunker::chunk` instead of the pseudocode's raw `parser.extract_chunks` is correct (M4
+  enrichment layer) and an improvement, not drift.
+- **FileMeta built correctly:** content_hash (xxhash via compute_file_hash), file_size (fs metadata
+  len), mtime (epoch secs, defensive 0), language (detect_language), chunk_count (chunks.len()).
+  Chunks are stamped with `file_path = path` before insert (parser/chunker leave it empty), so
+  get_file_meta/search key on the absolute-under-root path the tests query — verified.
+- **D2 isolation is sound and cannot abort.** Each `index_file` is wrapped in a `match`; `Err` is
+  counted-as-skipped, batch continues, `index_all` returns Ok. Only non-isolatable failures
+  (discovery walk/glob, the two set_index_state writes) propagate — correct. Confirmed `parse_file`
+  returns a tree (with ERROR nodes) on the broken fixture rather than Err, so broken.py takes the
+  chunker heuristic/empty path and the good file lands; the test passes for the right reason.
+- **Idiomatic / rules.** No reachable unwrap/expect/panic in production (the two `unwrap_or` at
+  pipeline.rs:56,101 are infallible defaults). IndexError is typed with a complete Display +
+  source() chain across all 7 variants. `?`/map_err throughout. The "skip group-by-language"
+  deviation is sound — `Parser::parse_file` sets the grammar per call (parser/mod.rs:147), so one
+  reused parser correctly handles every language; the HashMap grouping is unnecessary.
+- **Plan edit (§3.2.4) is accurate and minimal:** adds `root: PathBuf` as the 3rd arg with a
+  justifying comment (e2e/integration must point discovery at a TempDir; discover_files already
+  takes an explicit root), annotates the IndexError return types — no other surface changed.
+  Consistent with the RED contract and "change the plan before diverging."
+
+Tests: genuine, not weakened. Exact chunk/file counts (2 files → 2 chunks via single-fn fixtures),
+real searchability asserts (`symbol_name == ...` off SearchResult, not is_ok), FileMeta field
+asserts, index_state totals parsed as usize, D2 returns-Ok + good_fn-searchable. fmt-only whitespace
+change to the RED file (two wrapped asserts) — no assertion altered.
+
+Findings (all non-blocking — do NOT fix this slice):
+- minor (observability) — `src/indexer/mod.rs:82-84` — D2 swallows the per-file error silently
+  (`Err(_skipped) => {}`); IndexStats has no `errors`/`skipped` field, so a repo where half the
+  files fail to index is indistinguishable from a clean run at the API boundary. Acceptable for M5.2
+  (no scenario observes it, and the brief notes it), but flag for a follow-up: add a
+  `files_skipped` counter to IndexStats and/or `log::warn!` the skipped path+error so real bugs
+  aren't masked. Recommend the manager log this as an M5.3/M7 follow-up.
+- minor (test coverage gap) — `tests/chunker_tests.rs:191` — the only cross-reference test asserts a
+  single bare call (`hash_password`); there is no test exercising nested-function attribution or
+  dedup (a name called twice → listed once). The refactor is byte-identical so this is not a
+  blocker, but the cross-ref behavior the refactor touches is under-covered. Recommend a follow-up
+  RED test (nested call + duplicate call) to lock the dedup/first-seen contract independently of the
+  implementation. Logged, not gating.
+- minor (doc nit) — `benches/indexing.rs:4` — header comment says "50 files × ~6 functions each ≈
+  300 functions, roughly 1 500 LOC", contradicting line 51/72 and `py_function` (2 functions/file,
+  ~500 LOC). Cosmetic; align the header to the actual ~500 LOC / 2-fn-per-file figure.
+
+Slice M5.2 is DONE-eligible. Hand back to manager.

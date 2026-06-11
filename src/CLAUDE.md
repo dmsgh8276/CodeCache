@@ -15,6 +15,7 @@ CodeCache library + binary crate root. **Owner agent:** `principal-engineering-l
 | `parser/` | `parser` | M3 (TS/Go M9) | Tree-sitter grammars/queries, byte spans, ERROR-node detection (D2) |
 | `chunker/` | `chunker` | M4 | AST → enriched `Chunk`s (D3) |
 | `indexer/` | `indexer` | M5 | discovery → parse → chunk → hash → store; incremental |
+| `app.rs` | `app` | M5 | thin `init`/`index` facade over config/storage/indexer; `AppError` (M5.4) |
 | `retriever/` | `retriever` | M6 | BM25 + snippet + token budget (trait-backed for D1) |
 | `formatter/` | `formatter` | M7 | TOON/JSON/text; line ranges from stored line numbers (D7) |
 | `cli/` | `cli` | M7 | `clap` commands |

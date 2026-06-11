@@ -58,8 +58,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
         persisting the flag is a known M5/M7 follow-up (see `src/chunker/CLAUDE.md`).
       - All four gates green (Rust 1.85.0); 74 existing/new + 2 chunker unit tests pass.
 
-## Phase 5 — indexer (M5) · plan: [plans/M5-indexer.md](plans/M5-indexer.md) · brief: [.claude/briefs/BRIEF-M5-indexer.md](../.claude/briefs/BRIEF-M5-indexer.md)
-- Sliced M5.1–M5.4 (one commit per slice recommended); execution sequence + gate commands in the brief.
+## Phase 5 — indexer (M5) · plan: [plans/M5-indexer.md](plans/M5-indexer.md) · brief: [.claude/briefs/BRIEF-M5-indexer.md](../.claude/briefs/BRIEF-M5-indexer.md) · **DONE 2026-06-10**
+- Sliced M5.1–M5.4, one commit per slice (`ef36942`, `8482f05`, `707daba`, + M5.4). All slices
+  RED→GREEN→reviewer-APPROVED; **96 tests total** (15 lib + 10 indexer + 4 e2e + 11 hasher + 14
+  parser + 10 chunker + 3 chunker_proptest + 18 storage + 5 config + 1 smoke), all four gates clean
+  on Rust 1.85.0 (`build`/`clippy -D warnings`/`test --all`/`fmt --check`).
 - [x] **M5.1 discovery + language detection** — RED (5 tests: gitignore, config ignore_patterns,
       language filter, ext→language, non-source skipped) → test-lead; `discovery.rs` via
       `ignore::WalkBuilder` (`.require_git(false)`; config patterns via anchored Gitignore matcher)
@@ -84,9 +87,13 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
       changed/new, reconcile deletions via `all_indexed_files` vs disk → `delete_chunks_for_file` +
       `delete_file_meta`, restamp DB-wide totals). Storage gained `delete_file_meta` +
       `all_indexed_files` (plan §3.2.2 updated). 15/15 indexer + 1 new `pipeline` unit test; **92
-      tests total**, all four gates clean (Rust 1.85). Reviewer pending. GREEN 2026-06-10.
-- [ ] **M5.4 e2e init → index** — RED (`tests/e2e_index.rs` + `tests/fixtures/repo/**`) → test-lead;
-      thin `init`/`index` library glue → engineering-lead.
+      tests total**, all four gates clean (Rust 1.85). Reviewer APPROVED. **DONE 2026-06-10** (commit `707daba`).
+- [x] **M5.4 e2e init → index** — RED (4 e2e tests in `tests/e2e_index.rs`, public surface only;
+      tempdir fixtures, no committed tree) → test-lead; thin `src/app.rs` facade
+      (`init`/`index`/`AppError`, re-exported at crate root + `IndexStats`) → engineering-lead.
+      `init` creates `.codecache/` + writes default `config.toml` only-if-absent + idempotent
+      `init_schema`; `index` = config→storage→`Indexer::index_all` glue. Reviewer APPROVED.
+      **DONE 2026-06-10.**
 - **Decision (`is_heuristic` persistence seam):** **deferred to M7, not persisted in M5.** No M5
       scenario observes the flag after a storage round-trip and nothing branches on it; adding the
       column/migration now would be un-driven production surface (TDD). The indexer passes the

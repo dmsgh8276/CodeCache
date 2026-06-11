@@ -92,9 +92,31 @@ the `index_state` totals write) propagate as `Err`.
   O(chunks × tree_nodes)). Public `chunk()` signature + observable output (deduped, first-seen DFS
   order) unchanged; M4 chunker tests (10 + 3 proptest) stay green.
 
+## Shipped API (M5.4 — e2e init → index)
+The thin public `init`/`index` library facade lives in **`src/app.rs`** (single-file module; doc in
+the file header), re-exported at the crate root in `src/lib.rs`:
+- `codecache::init(project_root: &Path) -> Result<(), AppError>` — `create_dir_all(.codecache/)` →
+  write `toml::to_string(&Config::default())` to `.codecache/config.toml` **only if absent**
+  (non-clobbering) → `init_schema()` the DB at the resolved `db_path`. Idempotent: re-init never
+  errors and never rewrites an existing config.
+- `codecache::index(project_root: &Path) -> Result<IndexStats, AppError>` — `Config::load` →
+  `Storage::new(resolved db_path)` → `Indexer::new(config, storage, root)` → `index_all()`. Pure
+  glue; relies on M5.3 incremental+reconcile.
+- DB-path resolution: `project_root.join(&config.storage.db_path)` ⇒ `<root>/.codecache/index.db`
+  for the default config. `open_storage` `create_dir_all`s the db parent before `Storage::new`.
+- `codecache::AppError { Config(ConfigError), Storage(StorageError), Index(IndexError), Io{path,
+  source} }` — typed, `impl Display + std::error::Error` with `source()` chain; no reachable panic.
+- Crate-root re-exports: `pub use app::{index, init, AppError};` + `pub use indexer::IndexStats;`.
+
 ## Status
+**M5.4: GREEN (2026-06-10)** — public `init`/`index` facade (`src/app.rs`) + `AppError` shipped;
+4/4 `e2e_index` tests green (init creates `.codecache/`+config+DB; index populates a queryable DB
+with correct `IndexStats`; idempotent re-init; reindex-after-modification). **96 tests total**, all
+four gates clean (Rust 1.85). M5.1–M5.4 complete pending review. Brief:
+[`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).
+
 **M5.3: GREEN (2026-06-10)** — incremental `update_files` + idempotent/reconciling `index_all`
 (skip-unchanged no-writes, re-index changed/new, reconcile deletions, restamp totals) shipped.
 15/15 `indexer_tests` (5 M5.1 + 5 M5.2 + 5 M5.3) + 1 new `pipeline` unit test; **92 tests total**,
-all four gates clean (Rust 1.85). M5.4 (e2e init→index) pending. Brief:
+all four gates clean (Rust 1.85). Brief:
 [`.claude/briefs/BRIEF-M5-indexer.md`](../../.claude/briefs/BRIEF-M5-indexer.md).

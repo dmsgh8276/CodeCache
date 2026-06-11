@@ -69,6 +69,10 @@ this document is the source for "what scenarios must a slice cover" referenced b
 - Re-index (reconcile mode) discovers a newly-added file: its symbol is searchable + `files_metadata`
   row written, without dropping pre-existing files.
 - Deleted file ⇒ its chunks removed AND its `files_metadata` row cleared; `index_state` totals decrease.
+- **E2E (`tests/e2e_index.rs`, M5.4)** — public library surface (`codecache::{init, index}`), no CLI:
+  `init(root)` creates `.codecache/` + `config.toml` + the schema-initialized DB at the resolved
+  `db_path`; `index(root)` populates a queryable DB with correct `IndexStats`; re-`init` is
+  idempotent/non-clobbering; re-`index` after a file edit reflects the change (incremental reconcile).
 
 ### retriever
 - BM25 ranking deterministic; relevant chunk ranks above irrelevant.

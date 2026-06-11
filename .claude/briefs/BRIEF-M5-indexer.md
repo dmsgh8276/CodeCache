@@ -2,7 +2,7 @@
 
 - **Milestone:** M5 — indexer (discovery → parse → chunk → hash → store; incremental)  ·  **Module(s):** `indexer` (+ thin `init`/`index` glue)
 - **Owner (manager):** principal-engineering-manager  ·  **Created:** 2026-06-10
-- **Status (M5.3):** RED ✔  GREEN ✔  REVIEW ▢  DONE ▢  (M5.1/M5.2 DONE; M5.4 pending)
+- **Status:** RED ✔  GREEN ✔  REVIEW ✔  DONE ✔  — all four slices M5.1–M5.4 complete (2026-06-10)
 - **Links:** docs/plans/M5-indexer.md · docs/ROADMAP.md#m5--indexer · docs/TEST_STRATEGY.md#indexer · docs/project_plan.md §3.2.4 / §5.1 / §5.2 · docs/TODO.md Phase 5
 
 ## Goal
@@ -456,6 +456,117 @@ and will pass again once the target compiles. Fails for the right reason (missin
 incremental/reconcile logic), no typos/spurious warnings (the new `PathBuf` import is used by #3).
 Hand off to **principal-engineering-lead**.
 
+### M5.4 — e2e init → index (2026-06-10)
+
+**Tests added** (`tests/e2e_index.rs`, **new file**; the temp repo + `.codecache/` + DB are all
+built at runtime under `tempfile::TempDir` — preferred over a committed `tests/fixtures/repo/**`
+tree, consistent with M5.1–M5.3). Public library surface only; no private internals, no CLI.
+1. `e2e_init_then_index_populates_queryable_db` — builds a 3-file Python repo (`auth.py` =
+   1 function, `service.py` = class `Service` + `__init__` + `process`, `util.py` = 1 function).
+   `init(root)` ⇒ asserts `.codecache/` dir, `.codecache/config.toml`, and the resolved DB file
+   all exist. `index(root)` ⇒ asserts `IndexStats { files_processed: 3, chunks_indexed: 5 }`
+   (1 + 3 + 1; the class file yields 3 chunks per the M4 chunker — one chunk per class/method
+   definition), then re-opens the DB via the public `Storage::new`/`search` and asserts
+   `authenticate_user` and the `process` method are searchable.
+2. `e2e_init_is_idempotent_or_safe` — `init` twice must not error and must not clobber: the
+   `config.toml` bytes are captured after the first init and asserted **byte-identical** after the
+   second; the project still `index`es to `files_processed == 3` and symbols stay queryable.
+3. `e2e_reindex_after_modification_reflects_change` (the optional M5.3-tie-in, kept — cheap):
+   `init` → `index` → rewrite `util.py` (`normalize_path`→`canonicalize_path`) → `index` again ⇒
+   the new symbol is searchable, the old symbol is gone, and an untouched file's symbol survives.
+4. `app_error_is_public_and_debuggable` — type-level assertion that `AppError: std::error::Error`
+   is public/reachable at the crate root.
+
+All search-set assertions sort+dedup before comparing (determinism). The e2e re-opens the *same*
+on-disk DB `init`/`index` wrote, so the test and impl must agree on the resolved DB path (pinned
+below).
+
+**Pinned public surface the engineering lead must implement (match EXACTLY).** Decision:
+a thin **`src/app.rs`** facade re-exported at the crate root, so the e2e imports
+`codecache::{init, index, AppError, IndexStats}` (clean public surface — recommended in the task
+brief over `indexer`-reaching free functions):
+```rust
+// src/app.rs — re-exported from src/lib.rs as `pub use app::{init, index, AppError};`
+// and ALSO re-export `IndexStats` at the crate root: `pub use indexer::IndexStats;`
+use std::path::Path;
+use crate::indexer::IndexStats;
+
+/// Create `<root>/.codecache/`, write a default `config.toml`, create + `init_schema()` the DB.
+pub fn init(project_root: &Path) -> Result<(), AppError>;
+
+/// Load `<root>/.codecache/config.toml`, open `Storage` at the resolved db_path,
+/// `Indexer::new(config, storage, root)`, run `index_all`, return its stats.
+pub fn index(project_root: &Path) -> Result<IndexStats, AppError>;
+
+#[derive(Debug)]
+pub enum AppError {
+    Config(crate::config::ConfigError),
+    Storage(crate::storage::StorageError),
+    Index(crate::indexer::IndexError),
+}
+// + impl Display + std::error::Error (source() chain) — no reachable unwrap/expect/panic.
+```
+- **Crate-root re-exports required:** the test imports `codecache::{index, init, AppError,
+  IndexStats}` — all four must resolve at the crate root. `IndexStats` currently lives at
+  `codecache::indexer::IndexStats`; add `pub use indexer::IndexStats;` (or
+  `pub use app::{init, index, AppError};` + an `IndexStats` re-export) to `src/lib.rs`. (Compiler
+  even suggests `codecache::indexer::IndexStats` — promote it to the root rather than changing the
+  test, since the e2e specifies the facade's public surface.)
+- **`AppError` (DECIDED — new top-level enum wrapping the three sub-errors).** Recommended over
+  reusing `IndexError` for a clean public boundary: `init` can fail on storage (DB create/schema)
+  and IO (config write); `index` can fail on config load, storage open, or indexing. Wrap each in a
+  variant with `From` impls + a `source()` chain. The test only needs `AppError: std::error::Error`
+  + `Debug`, so the exact variant set is the eng lead's to finalize — but the three-way wrap is the
+  pinned shape.
+- **DB-path resolution (PINNED):** `init` and `index` load (or default) the `Config`, take
+  `config.storage.db_path` (default `.codecache/index.db`), and **resolve it against
+  `project_root`**: `project_root.join(&config.storage.db_path)`. For the default config this is
+  `<root>/.codecache/index.db` — exactly the path the test re-opens via `Storage::new`. (If
+  `db_path` is absolute, `Path::join` already yields it unchanged — fine.) `init` must
+  `fs::create_dir_all` the DB's parent (`<root>/.codecache/`) before `Storage::new`, since
+  `Connection::open` will not create missing parent directories.
+- **Config written by `init` (PINNED):** serialize `Config::default()` to TOML (e.g.
+  `toml::to_string`/`toml::to_string_pretty`) and write it to `<root>/.codecache/config.toml`. The
+  default config has empty `index_paths` ⇒ discovery walks `root` itself (the confirmed M5.1
+  default), and `languages = [python, typescript, go]` (the repo is Python-only, so only `.py` is
+  indexed). `index` then loads this file via `Config::load`. Note: `toml` is already a dependency
+  and `Config` already `#[derive(Serialize)]`, so no new deps and no new derive are needed.
+- **Idempotency semantics (DECIDED — re-init is safe and non-clobbering):** a second `init` must
+  **not** error and must **not** rewrite an existing `config.toml` (test #2 asserts the bytes are
+  identical across two inits — so guard the config write with an "exists?" check / write-if-absent;
+  do NOT unconditionally overwrite). `init_schema()` is already idempotent (`CREATE ... IF NOT
+  EXISTS`), so re-creating the `Storage` and re-calling it is a safe no-op. Net: `init` is callable
+  any number of times without data loss or error.
+- **`index` on a populated DB:** calls `Indexer::index_all`, which is already incremental + reconcile
+  (M5.3) — so test #3's second `index` correctly re-indexes the changed file and drops the old
+  symbol. No new indexer logic required for M5.4; this slice is **pure thin glue**.
+
+**RED output** (`cargo test --all --test e2e_index`, PATH-prefixed with `$HOME/.cargo/bin`):
+```
+   Compiling codecache v0.1.0 (C:\Users\ehlee\workspace\projects\CodeCache)
+error[E0432]: unresolved imports `codecache::index`, `codecache::init`, `codecache::AppError`, `codecache::IndexStats`
+  --> tests\e2e_index.rs:41:17
+   |
+41 | use codecache::{index, init, AppError, IndexStats};
+   |                 ^^^^^  ^^^^  ^^^^^^^^  ^^^^^^^^^^ no `IndexStats` in the root
+   |                 |      |     |
+   |                 |      |     no `AppError` in the root
+   |                 |      no `init` in the root
+   |                 no `index` in the root
+   |
+   = help: consider importing this struct instead:
+           codecache::indexer::IndexStats
+
+error: could not compile `codecache` (test "e2e_index") due to 1 previous error
+```
+Fails for the right reason: the `init`/`index`/`AppError` facade and the crate-root `IndexStats`
+re-export do not exist yet. `cargo test --all` aborts on this one target's compile-fail (expected
+RED). Verified the rest of the suite is untouched by running the unaffected targets directly:
+`cargo test --all --test indexer_tests` ⇒ **15/15 pass**; `cargo test --lib` ⇒ **15/15 pass**
+(incl. `indexer::pipeline::tests::detect_changed_files_empty_for_unchanged_repo`). Once the facade
+lands the `e2e_index` target compiles and its 4 tests run green. Hand off to
+**principal-engineering-lead**.
+
 ## GREEN — engineering lead
 
 ### M5.1 — discovery + language detection (2026-06-10)
@@ -880,3 +991,137 @@ Findings (all non-blocking nits — do NOT fix this slice):
   wanted, gate the restamp behind `!changed.is_empty() && no reconcile deletions`. Note only.
 
 Slice M5.3 is DONE-eligible. Hand back to manager.
+
+### M5.4 — e2e init → index (2026-06-10) — engineering lead
+
+**Implemented** (pure thin glue; matches the RED-pinned signatures exactly — no plan deviation):
+- `src/app.rs` (**new**) — the public application facade, `#[cfg(test)] mod tests {}` empty
+  (e2e lives in `tests/e2e_index.rs`):
+  - `pub fn init(project_root: &Path) -> Result<(), AppError>` — `create_dir_all(<root>/.codecache/)`
+    → write `toml::to_string(&Config::default())` to `<root>/.codecache/config.toml` **only if the
+    file does not already exist** (the non-clobbering guard) → `Config::load` the now-present config
+    → resolve db_path → `open_storage(db_path)?.init_schema()` (idempotent `CREATE ... IF NOT
+    EXISTS`). Re-`init` never errors and never rewrites an existing config.
+  - `pub fn index(project_root: &Path) -> Result<IndexStats, AppError>` — `Config::load(
+    <root>/.codecache/config.toml)` → `open_storage(resolved db_path)` → `Indexer::new(config,
+    storage, root.to_path_buf())` → `index_all()` → return stats. No new indexer logic — `index_all`
+    is already incremental+reconcile from M5.3, so test #3's second `index` re-indexes the changed
+    file and drops the old symbol unchanged.
+  - private helpers `resolve_db_path`, `open_storage`, `create_dir` keep the two entry points small.
+- `src/lib.rs` — added `pub mod app;` and crate-root re-exports
+  `pub use app::{index, init, AppError};` + `pub use indexer::IndexStats;`, so the e2e imports
+  `codecache::{index, init, AppError, IndexStats}` (and `codecache::storage::Storage`) all resolve.
+
+**AppError shape** (new top-level typed enum; `impl Display + std::error::Error` with a `source()`
+chain; no reachable `unwrap()/expect()/panic!`):
+```rust
+pub enum AppError {
+    Config(ConfigError),     // config load/serialize failure
+    Storage(StorageError),   // DB open / init_schema failure
+    Index(IndexError),       // indexing run failure
+    Io { path: PathBuf, source: std::io::Error },  // create-dir / write-config (+ TOML serialize)
+}
+```
+`Config`/`Storage`/`Index` wrap the three sub-errors per the pinned three-way shape; an extra `Io`
+variant carries the filesystem context (`create_dir_all`/config-write) so those failures aren't
+flattened into a sub-error they don't belong to. TOML-serialize failure (infallible for the static
+`Config::default`, but surfaced rather than unwrapped) is mapped into `Io` via
+`std::io::Error::other`. `source()` returns the wrapped sub-error / `io::Error` for each variant,
+so the e2e's `assert_error::<AppError>()` (`AppError: std::error::Error`) holds and the chain is
+inspectable.
+
+**DB-path resolution (matches the pinned contract):** `resolve_db_path(root, config) =
+root.join(&config.storage.db_path)`. For the default config (`db_path = ".codecache/index.db"`)
+this is `<root>/.codecache/index.db` — exactly the path the e2e re-opens via `Storage::new`. An
+absolute `db_path` is returned unchanged by `Path::join`. `open_storage` defensively
+`create_dir_all`s the db's parent before `Storage::new` (Connection::open won't create missing
+parents); `init` already creates `.codecache/` first, so this is belt-and-suspenders.
+
+**Idempotency guard:** `init` writes the config behind an `if !config_path.exists()` check, so a
+second `init` leaves the existing `config.toml` byte-for-byte untouched (test #2 asserts the bytes
+are identical across two inits). `init_schema()` is independently idempotent, so re-creating
+`Storage` and re-calling it is a safe no-op — `init` is callable any number of times without error
+or data loss.
+
+**Note for manager:** `tests/e2e_index.rs` (the RED file) was not rustfmt-clean (three
+calls/`let`s wrapped by fmt). I ran `cargo fmt --all` to satisfy the fmt gate; the change is
+**whitespace/line-wrapping only** — the fixture string literals (`"def authenticate_user():\n..."`)
+and every assertion are byte-identical, no test weakened/skipped/deleted. This matches the
+project's fmt-on-edit gate that formats every `.rs`. All 4 e2e tests pass.
+
+**Gate output (PATH-prefixed `$HOME/.cargo/bin`, all four green):**
+```
+cargo build                                  → Finished (clean)
+cargo clippy --all-targets -- -D warnings    → Finished (no warnings)
+cargo test --all                             → all green; e2e_index 4/4
+cargo fmt --all -- --check                   → clean (exit 0)
+```
+`tests/e2e_index.rs`: 4 passed / 0 failed. Whole suite: **96 tests** total (lib 15, chunker 10,
+chunker_proptest 3, config 5, **e2e_index 4**, hasher 11, indexer 15, parser 14, smoke 1,
+storage 18; main 0, doctests 0) — up from 92 by exactly the 4 new M5.4 tests. M5.1–M5.3 +
+storage/config all unchanged and green.
+
+Hand off to **code-reviewer**.
+
+### M5.4 — e2e init → index (2026-06-10) — **APPROVE** (runner-performed; reviewer agent hit a session limit)
+
+Reviewed `src/app.rs` (new), `src/lib.rs` (module decl + re-exports), `tests/e2e_index.rs` (4 tests),
+`src/indexer/CLAUDE.md`. Gates independently re-verified green by the runner (build, clippy
+--all-targets -D warnings, test --all = 96, fmt --check).
+
+**Verdict: APPROVE.** Pure thin glue, correct and aligned; no blockers.
+
+Correctness confirmed:
+- **`init` idempotency.** Config write guarded by `if !config_path.exists()` ⇒ a second `init` leaves
+  `config.toml` byte-identical (test #2); `init_schema` is independently idempotent. Re-init never
+  errors, never clobbers.
+- **db_path consistency.** `init`, `index`, and the test's `default_db_path` all resolve to
+  `<root>/.codecache/index.db` via `project_root.join(config.storage.db_path)` — the test re-opens
+  the same DB `index` wrote, so a path mismatch would (and does not) surface. `open_storage`
+  defensively `create_dir_all`s the db parent before `Storage::new`.
+- **`AppError`.** Typed enum (Config/Storage/Index + an Io variant for create-dir/write-config);
+  `Display` + `std::error::Error` with a correct `source()` chain; no reachable unwrap/expect/panic.
+  Folding the (infallible-for-default-Config) TOML-serialize error into `Io` via `io::Error::other`
+  is acceptable — surfaced not unwrapped.
+- **Public-surface hygiene.** Crate-root re-exports `pub use app::{index, init, AppError}` +
+  `pub use indexer::IndexStats` give M7/M8 a coherent library entry point; no leaked internals.
+- **Tests genuine.** 4 e2e tests use the public surface only, assert real outcomes (dirs/files exist,
+  IndexStats counts 3/5, symbol searchable in the re-opened DB), deterministic (sorted/deduped);
+  test #3 exercises M5.3 incremental reconcile through the facade.
+
+Findings (non-blocking, fixed by runner): two rustdoc lines in `src/app.rs` (`init` doc + `create_dir`
+doc) said filesystem failures map to `AppError::Config` when they actually map to `AppError::Io` —
+corrected during closeout (doc-only).
+
+Slice M5.4 DONE-eligible.
+
+## OUTCOME — manager (2026-06-10)
+
+**M5 — indexer: COMPLETE.** All four slices RED→GREEN→reviewer-APPROVED and committed one-per-slice.
+
+- **Aligned:** yes. API matches `project_plan.md` §3.2.4 (Indexer/IndexStats, extended doc-first with
+  the `root` param) + §3.2.2 (storage `delete_file_meta`/`all_indexed_files`, added doc-first) + §5.1
+  (full index) + §5.2 (incremental + reconcile). D2 (degrade-and-continue) and D3 (enrichment
+  flow-through) honored.
+- **Commits:** M5.1 `ef36942`, M5.2 `8482f05`, M5.3 `707daba`, M5.4 (this slice). Per-slice as
+  recommended; the M4 cross-ref single-pass perf fix rode in M5.2.
+- **Tests:** 96 total, all four gates clean on Rust 1.85.0. New: indexer 15 + e2e 4 + 1 pipeline unit.
+- **Docs updated (same change set):** `docs/TODO.md` Phase 5 (all slices checked, milestone marked
+  DONE), `src/indexer/CLAUDE.md`, `src/storage/CLAUDE.md`, `src/CLAUDE.md` (+`app` row), `src/lib.rs`
+  module map (+`app`, refreshed stale "M0 skeleton" line), `benches/CLAUDE.md`,
+  `docs/TEST_STRATEGY.md#indexer`, `docs/project_plan.md` §3.2.2/§3.2.4.
+- **Decision honored:** `is_heuristic` persistence deferred to M7 (no M5 scenario observes it; un-driven
+  schema migration avoided per TDD). Indexer passes the flag in-memory; stored repr drops it (unchanged
+  from M4).
+
+**Open follow-ups carried to M6/M7/M10 (all non-blocking, logged in `docs/TODO.md` Phase 5):**
+1. **Observability** — D2 silently swallows per-file errors in `index_all`/`update_files`; `IndexStats`
+   has no `files_skipped` counter. Add the counter (+`log::warn!` of path+error) so a run where many
+   files fail isn't indistinguishable from a clean run. → engineering-lead.
+2. **Cross-ref test coverage** — add a RED test for nested-function call attribution + duplicate-call
+   dedup (first-seen) to lock the contract independently of the single-pass impl. → test-lead.
+3. **Perf (M10)** — cold-index bench baseline ~1.1s/500 LOC; naive extrapolation exceeds the §5.4
+   10K-LOC budget. Profile the per-file transaction overhead (`insert_chunks`/`update_file_hash` once
+   per file) before M10; consider `restamp_index_state` N+1 → single `SELECT COUNT/SUM`. → perf.
+
+Next milestone: **M6 — retriever** (BM25 + snippet + token budget). Build order unblocked (M5 done).

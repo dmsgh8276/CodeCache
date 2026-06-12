@@ -15,8 +15,16 @@ in v0.2 without churn (**Decision Log D1**).
 empty/no-match → well-formed empty result; dedup of overlapping snippets.
 
 ## Perf
-Query latency budget p95 < 500ms on 100K LOC (project_plan §11.2). Bench wired by
-`performance-bench-engineer` at M6.4 / M10.
+Query latency budget **p95 < 500ms on 100K LOC, cold cache** (project_plan §1.3 / §11.2; warm
+breakdown target <100ms: FTS5 <50ms, BM25 <10ms, snippet <20ms, tokens <10ms, format <10ms).
+**M6.4 bench wired:** `benches/query_bench.rs` (registered in `Cargo.toml`, `harness=false`) seeds
+`Storage` directly with ~100K-LOC of synthetic chunks **outside** the timed region and times **only**
+`Retriever::query` (the full preprocess→FTS5→BM25→tie-break→dedup→token-budget-pack path). `max_results`
+left at the §3.2.3 default 20 so in-flight chunks stay within the ~10MB cap (§11.3). p50 ≈ criterion
+median; p95/p99 are read from criterion's raw `sample.json`. **Tracked baseline, not a hard CI gate** —
+exceeding 500ms is a regression signal; the hard budget gate (assert/CI-fail) + full suite land at M10.
+Actual measured p50/p95/p99 numbers are captured by the main-session `cargo bench --bench query_bench`
+run (the manager subagent cannot run cargo).
 
 ## Shipped API (M6.1 — query preprocessing)
 Module-private, dependency-free string helpers (no `Storage` yet; M6.2's `query` calls them):
@@ -99,4 +107,9 @@ The §6.3 greedy packer; `query` now trims to the budget instead of returning ev
   wired into `query`; `--max-tokens` is a hard ceiling. 5 new integration tests + 1 unit test
   (`estimate_tokens_is_len_div_4_min_1`). Reviewer APPROVED. **Gates pending main-session
   verification** (manager subagent cannot run cargo).
-- **M6.4:** pending — query-latency bench (perf engineer, p95 < 500ms).
+- **M6.4 BENCH WIRED + APPROVED (2026-06-11):** `benches/query_bench.rs` + `Cargo.toml` `[[bench]]`.
+  Synthetic ~100K-LOC seeded index (5 000 chunks ×20 LOC) built outside the timed closure; times only
+  `Retriever::query`; `sample_size=100` (each sample = one query → p50≈median, p95/p99 from raw
+  `sample.json`). p95<500ms tracked as a **baseline, not a CI gate** (hard gate = M10). Reviewer APPROVED.
+  **Actual p50/p95/p99 + clippy/fmt/`cargo bench` + EXPLAIN QUERY PLAN baseline PENDING main-session run**
+  (manager subagent cannot run cargo).

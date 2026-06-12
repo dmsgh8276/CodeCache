@@ -22,6 +22,10 @@ path = "src/main.rs"
 name = "indexing"
 harness = false
 
+[[bench]]
+name = "query_bench"
+harness = false
+
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive"] }

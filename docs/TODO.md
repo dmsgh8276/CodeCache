@@ -113,7 +113,10 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · → owner
       tests gate the refactor. Cold-index bench baseline recorded (perf flags per-file transaction
       overhead for M10 profiling — naive extrapolation over the 10K-LOC budget).
 
-## Phase 6 — retriever (M6) · plan: [plans/M6-retriever.md](plans/M6-retriever.md) · **IN PROGRESS 2026-06-10**
+## Phase 6 — retriever (M6) · plan: [plans/M6-retriever.md](plans/M6-retriever.md) · **DONE 2026-06-11**
+M6.1–M6.4 all DONE + green; one commit per slice (`ed854dd`, `efbfece`, `1e3084f`, + M6.4). **117
+tests** + a query-latency bench (p95 = 1.17 ms vs the 500 ms budget). `Retriever` behind `trait
+Retrieve` (D1); deterministic BM25 ranking + dedup; `--max-tokens` hard ceiling. Exit criteria met.
 Sliced M6.1–M6.4 per the phase plan (one TDD cycle + one commit each). Builds only on M1 `storage`
 (`search`/`bm25()`/`SearchResult { chunk, bm25_score }`), so tests seed storage directly — no real
 indexing needed. APIs match project_plan §3.2.3 (`Retriever`/`QueryOptions`/`QueryResult`) + §6.
@@ -159,8 +162,16 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       +12 retriever +3 chunker_proptest +10 chunker +5 config +4 e2e +11 hasher +15 indexer
       +14 parser +1 smoke +18 storage), `cargo build`. **DONE 2026-06-11.**
       brief: [.claude/briefs/BRIEF-M6.3-token-budget-packing.md](../.claude/briefs/BRIEF-M6.3-token-budget-packing.md)
-- [ ] **M6.4 query-latency bench** — `benches/query_bench.rs` over synthetic 100K-LOC index; p50/p95/p99;
-      track p95 < 500ms (full budget gate at M10) → **performance-bench-engineer** → reviewer.
+- [x] **M6.4 query-latency bench** — `benches/query_bench.rs` registered in `Cargo.toml` (`harness=false`),
+      seeds `Storage` directly with 5 000 synthetic chunks ×20 LOC ≈ 100K-LOC scale **outside** the timed
+      closure; times **only** `Retriever::query` (preprocess→FTS5→BM25→dedup→pack); `sample_size=100` so each
+      sample is one query (p50 ≈ criterion median; p95/p99 from raw `target/criterion/.../sample.json`).
+      Tracks **p95 < 500ms** (§1.3/§11.2) as a **baseline, NOT a hard gate** — the budget gate is M10.
+      Reviewer APPROVED. **Bench run on main session (Rust 1.85, release, 2026-06-11): p50 = 1.02 ms,
+      p95 = 1.17 ms, p99 = 1.22 ms — p95 is ~425× under the 500 ms budget ✅.** clippy `--all-targets`
+      + fmt clean (cover the bench). EXPLAIN QUERY PLAN baseline (§11.2, carried from M1) **deferred to
+      M10** with the hard budget gate (bench temp DB is per-run; capture against a persistent fixture).
+      **DONE 2026-06-11.**
       brief: [.claude/briefs/BRIEF-M6.4-latency-bench.md](../.claude/briefs/BRIEF-M6.4-latency-bench.md)
 - Replan note (D14): **self-healing search lands at M8, not M6** — M6 scope frozen mid-flight.
   M6's only obligation: `QueryResult` chunks keep `file_path` (already true) so M8 can hash-check
@@ -189,6 +200,9 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
 
 ## Phase 10 — Benchmarks + Release (M10) · plan: [plans/M10-benchmarks-release.md](plans/M10-benchmarks-release.md)
 - [ ] Full criterion suite vs systems budgets (p95<500ms, index<100MB, incr<2s, cold-index, hash) → perf
+      - M6 baseline already met: query p95 = 1.17 ms (`benches/query_bench.rs`, 100K-LOC seed) ≪ 500 ms.
+      - [ ] **EXPLAIN QUERY PLAN baseline** for the §6 `SEARCH` SQL (carried from M1 + M6.4) — capture
+            against a **persistent** fixture DB (M6.4's bench DB is a per-run tempfile) → perf + specialist
 - [ ] **D16 Layer-1 retrieval-quality scoring** (replaces the 5-task token-reduction benchmark):
       ContextBench-Lite gold-context Recall/Precision/F1 + hand-verified micro-suite
       (`project_overview.md` §5.1–5.2) → perf

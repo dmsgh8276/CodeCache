@@ -1212,6 +1212,37 @@ Last update:      2026-06-09 10:03:29 UTC
 ────────────────────────────────────────
 ```
 
+#### `codecache config`
+
+Read or write configuration values in `.codecache/config.toml` (Decision Log D18).
+
+```bash
+codecache config [KEY] [VALUE] [OPTIONS]
+
+ARGUMENTS:
+    [KEY]      Config key to read or set (omit to print the whole resolved config)
+    [VALUE]    New value to set for KEY (omit to read KEY)
+
+OPTIONS:
+    --db-path <PATH>    Database location [default: .codecache/index.db]
+
+EXAMPLES:
+    # Print the current resolved configuration
+    codecache config
+
+    # Set a value and persist it back to .codecache/config.toml
+    codecache config storage.max_db_size_mb 1000
+```
+
+Backed by `Config::load` (read) + the additive `Config::save` (write, D18). Writes never clobber
+unrelated keys (the full `Config` is round-tripped through TOML). Unknown keys / malformed values
+exit nonzero with a message; no panic.
+
+> **Empty-result text output (M7.3):** when `query` finds no matches AND `--format text` (the
+> default), the CLI prints `No results found.` rather than the formatter's empty-text header (which
+> echoes the query). This is a CLI presentation choice; the pure `formatter` empty-text shape (§6.4.3)
+> is unchanged, and `--format json`/`toon` always render through the formatter.
+
 #### `codecache serve`
 
 Start MCP server for agent integration.

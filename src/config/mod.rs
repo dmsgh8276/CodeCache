@@ -172,6 +172,13 @@ pub enum ConfigError {
         /// The underlying TOML deserialization error.
         source: toml::de::Error,
     },
+    /// The config could not be serialized to TOML before writing (`Config::save`, D18).
+    Serialize {
+        /// The path we were about to write.
+        path: String,
+        /// The underlying TOML serialization error.
+        source: toml::ser::Error,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -183,6 +190,9 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Parse { path, source } => {
                 write!(f, "failed to parse config file '{path}': {source}")
             }
+            ConfigError::Serialize { path, source } => {
+                write!(f, "failed to serialize config for '{path}': {source}")
+            }
         }
     }
 }
@@ -192,6 +202,7 @@ impl std::error::Error for ConfigError {
         match self {
             ConfigError::Io { source, .. } => Some(source),
             ConfigError::Parse { source, .. } => Some(source),
+            ConfigError::Serialize { source, .. } => Some(source),
         }
     }
 }
@@ -207,6 +218,26 @@ impl Config {
             source,
         })?;
         toml::from_str::<Config>(&raw).map_err(|source| ConfigError::Parse {
+            path: display,
+            source,
+        })
+    }
+
+    /// Serialize the full config to TOML and write it to `path` (additive, **D18**). Used by the
+    /// CLI `config <KEY> <VALUE>` write path to persist a mutated setting without clobbering
+    /// unrelated keys (the whole resolved config is re-serialized). Returns a typed [`ConfigError`]
+    /// (never panics) on a serialization or I/O failure.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Serialize`] if the config cannot be encoded as TOML, and
+    /// [`ConfigError::Io`] if the file cannot be written.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        let display = path.display().to_string();
+        let toml = toml::to_string(self).map_err(|source| ConfigError::Serialize {
+            path: display.clone(),
+            source,
+        })?;
+        std::fs::write(path, toml).map_err(|source| ConfigError::Io {
             path: display,
             source,
         })
@@ -229,5 +260,22 @@ mod tests {
             vec![Language::Python, Language::TypeScript, Language::Go]
         );
         assert_eq!(cfg.storage.db_path, ".codecache/index.db");
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let dir = std::env::temp_dir().join(format!("cc-config-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+
+        let mut cfg = Config::default();
+        cfg.storage.max_db_size_mb = 1000;
+        cfg.save(&path).expect("save config");
+
+        let loaded = Config::load(&path).expect("load saved config");
+        assert_eq!(loaded.storage.max_db_size_mb, 1000);
+        assert_eq!(loaded, cfg);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

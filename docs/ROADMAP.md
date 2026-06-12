@@ -275,6 +275,18 @@ approved on the same "test-only, keeps Cargo.toml runtime-lean" basis. Pin to cu
 Owner: manager (sign-off) + devops (CI parity) + test-lead (usage in `tests/cli_tests.rs`,
 `tests/e2e_cli.rs`). Recorded in `docs/plans/M7-formatter-cli.md` deviations.
 
+### D18 — additive `Config::save` for the `codecache config` write path  · **Ratified for v0.1** (plan: M7.3) — *spec: §7.2 (`config`), §7.3*
+M7.3's `config` command must read AND write settings (§7.2 lists `config` as "Manage
+configuration"), but the M1 `config` module shipped only `Config::load(&Path)`. **Decision: add an
+additive `Config::save(&self, path: &Path) -> Result<(), ConfigError>`** that serializes the in-memory
+`Config` back to `.codecache/config.toml` via `toml::to_string` (the same serializer `app::init`
+already uses), mapping a serialize/write failure to `ConfigError` (no panic, no reachable
+`unwrap/expect`). This is purely additive — it does not change `load`, the §7.3 schema, or any
+existing caller. `config` semantics for M7.3: no args ⇒ print the current resolved config (read);
+`config <KEY> <VALUE>` ⇒ set a documented top-level/scalar key + persist via `save`. Owner: eng-lead
+(impl under `config`) + manager (this decision + spec note). project_plan §7.2 updated to pin the
+read/write `config` behavior; `src/config/CLAUDE.md` records the new `save` API at GREEN.
+
 ### D7 (re-verified at M7 entry) — line-number seam is real and fully wired  · **Confirmed 2026-06-12** — *spec: §4.1, §4.3*
 The M7 formatter plan flagged D7 ("store `start_line`/`end_line` at index time") as a seam to
 verify before slicing. **Verification result: the seam exists end-to-end; no gap, no fix needed.**

@@ -5,10 +5,20 @@
 //! scenarios in `docs/TEST_STRATEGY.md#cli`.
 //!
 //! M7.2: the `clap` derive surface (parsing + `--help`/`--version` + error → nonzero exit) mirrors
-//! §7.1–§7.2 exactly. Command *handlers* are M7.3 — for now they are thin placeholders that print a
-//! "not yet implemented" line and return `Ok(())`, never panicking. `Cli::parse()` auto-exits with
-//! a nonzero code on a parse/validation error (bad type, out-of-set enum, missing required arg,
-//! unknown subcommand), which is what the M7.2 RED tests pin.
+//! §7.1–§7.2 exactly. M7.3 wires the real command handlers (one submodule each) that delegate to
+//! the `app` facade / `Indexer` / `Retriever` / `Config` / `Storage`; `dispatch` routes a parsed
+//! [`Cli`] to them. `serve` stays an M8 stub. `Cli::parse()` auto-exits with a nonzero code on a
+//! parse/validation error (bad type, out-of-set enum, missing required arg, unknown subcommand);
+//! handler `Err` surfaces through `anyhow` → nonzero exit in `main`. No reachable panic.
+
+mod config;
+mod index;
+mod init;
+mod paths;
+mod query;
+mod serve;
+mod status;
+mod update;
 
 use std::path::PathBuf;
 
@@ -165,34 +175,43 @@ pub enum Transport {
 }
 
 /// Entry point invoked by `main`. Parses argv (clap auto-exits nonzero on a parse error, prints
-/// `--help`/`--version`) and dispatches to a thin per-command handler. Handlers are M7.3 stubs for
-/// now; nothing here panics or `unwrap`s on a reachable path.
+/// `--help`/`--version`) and dispatches to the per-command handler. Handler `Err` surfaces through
+/// `anyhow` → nonzero exit in `main`; nothing here panics or `unwrap`s on a reachable path.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     dispatch(cli)
 }
 
-/// Route a parsed [`Cli`] to its command handler. Split out from [`run`] so M7.3 can grow real
-/// handlers (and unit-test dispatch) without re-touching argv parsing.
+/// Route a parsed [`Cli`] to its command handler (one submodule each). Split out from [`run`] so
+/// the handlers stay testable without re-touching argv parsing.
 fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Init { .. } => not_yet_implemented("init"),
-        Command::Index { .. } => not_yet_implemented("index"),
-        Command::Update { .. } => not_yet_implemented("update"),
-        Command::Query { .. } => not_yet_implemented("query"),
-        Command::Status { .. } => not_yet_implemented("status"),
-        Command::Config { .. } => not_yet_implemented("config"),
-        Command::Serve { .. } => {
-            println!("serve: the MCP server is not implemented yet (M8).");
-            Ok(())
-        }
+        Command::Init { .. } => init::run(),
+        Command::Index { .. } => index::run(),
+        Command::Update { files, db_path } => update::run(&files, &db_path),
+        Command::Query {
+            query,
+            max_tokens,
+            max_results,
+            format,
+            file_filter,
+            db_path,
+        } => query::run(
+            &query,
+            max_tokens,
+            max_results,
+            format,
+            file_filter.as_deref(),
+            &db_path,
+        ),
+        Command::Status { db_path } => status::run(&db_path),
+        Command::Config {
+            key,
+            value,
+            db_path,
+        } => config::run(key.as_deref(), value.as_deref(), &db_path),
+        Command::Serve { .. } => serve::run(),
     }
-}
-
-/// Placeholder for an M7.3 command handler: prints a clean notice and succeeds (no panic).
-fn not_yet_implemented(command: &str) -> Result<()> {
-    println!("{command}: not yet implemented (M7.3).");
-    Ok(())
 }
 
 #[cfg(test)]

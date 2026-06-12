@@ -189,7 +189,13 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       `--transport`); `run()`→`Cli::parse()`→`dispatch()`, Err→nonzero exit, no panic. 5 tests green
       (`tests/cli_tests.rs`, assert_cmd/predicates dev-deps D17); reviewer APPROVED (0 findings).
       Handlers are inert M7.3 placeholders.
-- [ ] M7.3 command handlers + status (delegate to app/Indexer/Retriever/Config/Storage; `serve` stub) → test-lead → engineering-lead
+- [x] **M7.3 command handlers + status** → DONE 2026-06-12: per-command handlers (`src/cli/{init,
+      index,update,query,status,config,serve}.rs` + `paths.rs`) delegating to `app::{init,index}` /
+      `Indexer::update_files` / `Retriever::query`→`formatter::format` / `Storage` aggregates /
+      `Config::load`+`save`. `status` = version + Files + Chunks + size + per-language (timestamps +
+      per-symbol_type deferred, no schema change). **D18** additive `Config::save` for `config`
+      read/write. Empty text query → `No results found.` (CLI UX; formatter golden unchanged). 11/11
+      cli_tests green; reviewer APPROVED (0 findings). `serve` = clean M8 stub.
 - [ ] M7.4 E2E through the built binary (init→index→query, assert_cmd) → test-lead → engineering-lead
 
 ## Phase 8 — mcp_server (M8) · plan: [plans/M8-mcp-server.md](plans/M8-mcp-server.md)

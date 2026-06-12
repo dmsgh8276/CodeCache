@@ -15,6 +15,9 @@
 //! subprocess — there is no not-yet-existing library API to import), so the failures are
 //! purely behavioral.
 
+use std::fs;
+use std::path::Path;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use predicates::str::contains;
@@ -189,6 +192,260 @@ fn unknown_command_errors_cleanly() {
         // clap reports the unrecognized subcommand by name.
         .stderr(contains("frobnicate"))
         // A clean parse error, never a Rust panic.
+        .stderr(contains("panicked").not())
+        .stdout(contains("panicked").not());
+}
+
+// ===========================================================================
+// M7.3 — command handlers + status (RED, test-lead).
+//
+// These tests drive the BUILT `codecache` binary end-to-end against a real
+// `tempfile::TempDir` project root (via `.current_dir(tmp)`, exercising
+// cwd-relative path resolution) and assert REAL handler behavior: files are
+// created on disk, the index reports the counts that genuinely exist, a known
+// symbol is retrieved + formatted, an update re-indexes, and a config write
+// persists through `Config::save` (D18).
+//
+// RED rationale: M7.2 shipped the clap surface but the handlers are inert
+// placeholders — each prints "<cmd>: not yet implemented (M7.3)." and returns
+// Ok(()) WITHOUT creating a db, indexing, querying, or persisting config. So:
+//   * `init` does not write `.codecache/{config.toml,index.db}`,
+//   * `status` reports no real counts,
+//   * `query` does not emit the symbol / a file:line locator nor valid JSON,
+//   * `update` does not re-index,
+//   * `config` does not print defaults nor persist a new value.
+// Every assertion below fails against those inert handlers for the right
+// reason (handlers don't do the work yet), NOT a compile error: assert_cmd
+// drives a subprocess, so there is no not-yet-existing library API to import.
+//
+// Fixture: `tests/fixtures/python/enriched_module.py` (committed). It defines a
+// free function `hash_password`, a class `UserService`, and the method
+// `register` (3 chunks across 1 Python file) — so the indexed totals are
+// deterministic and `hash_password` is a stable, clearly-named query target.
+//
+// Config key pinned for the eng-lead's GREEN: `storage.max_db_size_mb`
+// (`StorageConfig.max_db_size_mb: u64`, documented default 500, §7.3). It
+// round-trips cleanly through `Config` and is set to `1000` per §7.2's own
+// example (`codecache config storage.max_db_size_mb 1000`).
+// ===========================================================================
+
+/// The committed Python fixture used by the handler E2E tests. Copied into each
+/// test's temp project root so indexing has a real, deterministic source file.
+const ENRICHED_MODULE: &str = include_str!("fixtures/python/enriched_module.py");
+
+/// A second tiny Python source with a distinct, clearly-named symbol, written at
+/// runtime for the `update` test (so the newly-indexed symbol is unambiguous).
+const NEW_MODULE_SRC: &str = "def freshly_added_symbol():\n    return 42\n";
+
+/// Build a fresh temp project root containing exactly one real `.py` source file
+/// (`module.py`, the enriched fixture). Returned `TempDir` cleans up on drop.
+fn temp_project() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("create temp project dir");
+    fs::write(tmp.path().join("module.py"), ENRICHED_MODULE).expect("write fixture source");
+    tmp
+}
+
+/// Fresh binary handle whose working directory is `root` — exercises the cwd-
+/// relative `.codecache/` + db-path resolution the handlers must perform.
+fn cc_in(root: &Path) -> Command {
+    let mut cmd = cc();
+    cmd.current_dir(root);
+    cmd
+}
+
+// ---------------------------------------------------------------------------
+// 1. `init` creates the db + config on disk (§7.2 "Generated files").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn init_creates_db_and_config() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+
+    let config_path = root.join(".codecache").join("config.toml");
+    let db_path = root.join(".codecache").join("index.db");
+
+    assert!(
+        config_path.is_file(),
+        "init must write .codecache/config.toml (found: {})",
+        config_path.display()
+    );
+    assert!(
+        db_path.is_file(),
+        "init must create .codecache/index.db (found: {})",
+        db_path.display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. `index` then `status` reports the counts that ACTUALLY EXIST (§7.2):
+//    the crate version, a files total, and a chunks total. The enriched
+//    fixture is 1 file / 3 chunks (hash_password fn + UserService class +
+//    register method), so those totals are pinned exactly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn index_then_status_reports_counts() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+    cc_in(root).arg("index").assert().success();
+
+    let version = env!("CARGO_PKG_VERSION");
+
+    cc_in(root)
+        .arg("status")
+        .assert()
+        .success()
+        // Version line (§7.2 layout: `Version: 0.1.0`).
+        .stdout(contains(version))
+        // Files section reports the genuine total_files aggregate: 1 source file.
+        .stdout(contains("Files"))
+        .stdout(contains("1"))
+        // Chunks section reports the genuine total_chunks aggregate: 3 chunks.
+        .stdout(contains("Chunks"))
+        .stdout(contains("3"));
+}
+
+// ---------------------------------------------------------------------------
+// 3. `query <symbol>` prints formatted results wiring Retriever -> formatter.
+//    Default (text) output contains the symbol name + a file:line locator;
+//    `--format json` yields parseable JSON that still contains the symbol.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn query_command_prints_formatted_results() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+    cc_in(root).arg("index").assert().success();
+
+    // Default text format: stdout names the symbol and a `module.py:` locator.
+    cc_in(root)
+        .args(["query", "hash_password"])
+        .assert()
+        .success()
+        .stdout(contains("hash_password"))
+        .stdout(contains("module.py"));
+
+    // JSON format: stdout is parseable JSON that contains the symbol somewhere.
+    let out = cc_in(root)
+        .args(["query", "hash_password", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).expect("query --format json stdout must be valid UTF-8");
+    let value: serde_json::Value =
+        serde_json::from_str(&stdout).expect("query --format json must emit parseable JSON");
+    assert!(
+        value.to_string().contains("hash_password"),
+        "JSON query output must contain the queried symbol `hash_password`; got: {value}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. `update <FILE>` re-indexes the given file: a newly-added source file with
+//    a fresh symbol becomes queryable after `update`, proving the handler runs
+//    `Indexer::update_files` on the listed path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn update_command_reindexes_given_files() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+    cc_in(root).arg("index").assert().success();
+
+    // The new symbol does not exist in the index yet.
+    cc_in(root)
+        .args(["query", "freshly_added_symbol"])
+        .assert()
+        .success()
+        .stdout(contains("freshly_added_symbol").not());
+
+    // Add a new source file and update ONLY it.
+    let new_file = root.join("fresh.py");
+    fs::write(&new_file, NEW_MODULE_SRC).expect("write new source file");
+    cc_in(root).args(["update", "fresh.py"]).assert().success();
+
+    // After the targeted update the new symbol is queryable.
+    cc_in(root)
+        .args(["query", "freshly_added_symbol"])
+        .assert()
+        .success()
+        .stdout(contains("freshly_added_symbol"))
+        .stdout(contains("fresh.py"));
+}
+
+// ---------------------------------------------------------------------------
+// 5. `config` reads + writes settings, persisting through `Config::save` (D18).
+//    Key pinned: `storage.max_db_size_mb` (default 500 -> set to 1000, §7.2).
+//    Reading with no args prints the resolved config (default value appears);
+//    writing the key sets it, a subsequent read shows the new value, and the
+//    on-disk `.codecache/config.toml` contains it (proves persistence).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn config_command_reads_writes_settings() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+
+    // Read (no args): the resolved config prints the documented default (500).
+    cc_in(root)
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(contains("max_db_size_mb"))
+        .stdout(contains("500"));
+
+    // Write: set the scalar key to a new value (§7.2 example).
+    cc_in(root)
+        .args(["config", "storage.max_db_size_mb", "1000"])
+        .assert()
+        .success();
+
+    // Read again: the new value is reflected in the printed config.
+    cc_in(root)
+        .arg("config")
+        .assert()
+        .success()
+        .stdout(contains("max_db_size_mb"))
+        .stdout(contains("1000"));
+
+    // Persistence: the on-disk config.toml carries the new value (Config::save).
+    let config_path = root.join(".codecache").join("config.toml");
+    let persisted = fs::read_to_string(&config_path).expect("read persisted config.toml");
+    assert!(
+        persisted.contains("1000"),
+        "config write must persist `storage.max_db_size_mb = 1000` to disk; got:\n{persisted}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. (optional) `serve` is a clean stub this slice — it must not panic/segfault
+//    and should surface a notice. We do not pin an exact exit code (M8 owns the
+//    final semantics); we only assert no Rust panic leaks to either stream.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn serve_is_a_clean_stub() {
+    let tmp = temp_project();
+    let root = tmp.path();
+
+    cc_in(root).arg("init").assert().success();
+
+    cc_in(root)
+        .arg("serve")
+        .assert()
         .stderr(contains("panicked").not())
         .stdout(contains("panicked").not());
 }

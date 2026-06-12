@@ -2,7 +2,35 @@
 
 - **Milestone:** M7 — formatter + cli  ·  **Module(s):** `formatter`, `cli`, `main.rs`
 - **Owner (manager):** principal-engineering-manager  ·  **Created:** 2026-06-12
-- **Status (per slice):** M7.1 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (commit e360818) · M7.2 RED ▶ · M7.3 ▢ · M7.4 ▢
+- **Status (per slice):** M7.1 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (e360818) · M7.2 RED ✓ GREEN ✓ REVIEW ✓ DONE ✓ (50e3eb0) · M7.3 RED ▶ · M7.4 ▢
+
+## Manager notes for M7.3 (handlers + status) — real APIs the handlers delegate to
+- **init:** `codecache::init(project_root: &Path) -> Result<(), AppError>` — CLI passes the resolved
+  working dir as `project_root`. Idempotent; writes `.codecache/{config.toml,index.db}`.
+- **index:** `codecache::index(project_root: &Path) -> Result<IndexStats, AppError>` (full/incremental
+  per M5.3). `IndexStats { files_processed, chunks_indexed, duration_ms }`.
+- **update:** open `Storage` + build `Indexer::new(config, storage, root)`, then
+  `Indexer::update_files(&[PathBuf]) -> Result<IndexStats, IndexError>`. CLI maps the positional
+  `<FILE>...` (glob strings) to the path list. (Glob expansion: resolve given args to concrete paths;
+  if a raw glob is passed, keep it simple — `update_files` re-indexes the listed paths.)
+- **query:** `Retriever::new(Storage)` + `Retrieve::query(&str, QueryOptions) -> Result<QueryResult>`;
+  map `--max-tokens/--max-results/--file-filter` → `QueryOptions`, then pipe `QueryResult` through
+  `formatter::format(&qr, &query, fmt)` (fmt from the CLI `OutputFormat` via the `From` seam) and
+  print. `--file-filter` glob → `QueryOptions.file_filter` (a `Vec<PathBuf>` post-filter; minimal
+  glob→paths mapping acceptable — exact-match list is the shipped semantics, document any expansion).
+- **status:** read aggregates that ACTUALLY EXIST. `Storage::get_index_state("total_files")` /
+  `("total_chunks")` (decimal strings, written by the indexer's `restamp_index_state`). DB size from
+  the db file length. Per-language file counts can be derived from `files_metadata` (FileMeta carries
+  `language`, `chunk_count`). **NOT currently stored:** Created/Last-index timestamps and per-
+  symbol_type counts from the §7.2 illustrative output — do NOT add schema columns in this slice;
+  RED should assert the counts that exist (version + total_files + total_chunks; language breakdown
+  if cheaply derivable) and the eng-lead may omit/placeholder the rest. Flag any gap as a follow-up.
+- **config:** **D18** — read = no args ⇒ print resolved `Config`; write = `config <KEY> <VALUE>` ⇒
+  set + persist via the **new additive `Config::save(&self, path: &Path) -> Result<(), ConfigError>`**
+  (serialize the full `Config` to TOML, no clobber). project_plan §7.2 now specs `config`; ROADMAP
+  D18 records the additive API. Eng-lead implements `Config::save` under the `config` module.
+- **serve:** stub (clean message, M8). Per scope: prints a "not yet (M8)" notice; exit code per plan
+  (zero or nonzero acceptable — keep it non-crashing; M8 owns final semantics).
 - **Links:** docs/plans/M7-formatter-cli.md · docs/ROADMAP.md#m7--formatter--cli ·
   docs/TEST_STRATEGY.md#formatter / #cli · project_plan.md §6.4 (formats) / §7 (CLI) / §8.2 (D13 ordering)
 - **Routing:** manager → test-lead (RED) → engineering-lead (GREEN; route any FTS5/skeleton-line
@@ -288,6 +316,98 @@ behavioral. This is the correct RED. Hand to **principal-engineering-lead** for 
   help rendering such that a literal default value is hidden, ping the test-lead — but standard
   `#[arg(default_value_t = ...)]` / `default_value = "..."` surfaces them and satisfies the test.
 
+### M7.3 — handlers + status — RED landed 2026-06-12
+
+**Tests added — `tests/cli_tests.rs`** (extended; 5 new handler tests + 1 optional serve stub,
+named exactly per the slice). They drive the BUILT binary via `assert_cmd` with
+`.current_dir(<TempDir>)` so cwd-relative `.codecache/` + db-path resolution is exercised E2E.
+JSON is validated with `serde_json` (already a dep); temp roots via `tempfile` (dev-dep). The
+five M7.2 parsing tests are untouched and still pass.
+
+**Fixture + symbol used:** `tests/fixtures/python/enriched_module.py` (committed), copied into
+each temp root as `module.py`. It defines free fn `hash_password`, class `UserService`, and
+method `register` ⇒ **1 file / 3 chunks** (deterministic totals). Query target =
+`hash_password` (clearly-named, stable). The `update` test additionally writes a runtime
+`fresh.py` containing `def freshly_added_symbol()` (distinct, unambiguous new symbol).
+
+**Config key pinned for GREEN (eng-lead, implement THIS path):** `storage.max_db_size_mb`
+(`StorageConfig.max_db_size_mb: u64`, documented default **500**, §7.3). The write test sets it
+to **1000** (matching §7.2's own example `codecache config storage.max_db_size_mb 1000`). It is a
+scalar that round-trips cleanly through `Config` + the new additive `Config::save` (D18). The
+read-with-no-args path must print the resolved config such that `max_db_size_mb` and its value
+appear in stdout (e.g. TOML/Debug dump of `Config` — eng-lead's choice, but the value must show).
+
+**Exactly what each test asserts (so GREEN targets it):**
+1. `init_creates_db_and_config` — `codecache init` exits 0 AND `.codecache/config.toml` +
+   `.codecache/index.db` exist on disk afterward.
+2. `index_then_status_reports_counts` — `init` → `index` → `status`; `status` exits 0 and stdout
+   contains the crate version (`env!("CARGO_PKG_VERSION")` = `0.1.0`), a `Files` section with the
+   real `total_files` = `1`, and a `Chunks` section with the real `total_chunks` = `3`. Only the
+   counts that genuinely exist in `index_state` are asserted — NO Created/Last-index timestamps,
+   NO per-symbol_type breakdown (not stored; per manager notes the eng-lead may omit/placeholder
+   those §7.2 lines). The `1`/`3` substrings are derived from the indexed fixture.
+3. `query_command_prints_formatted_results` — after init+index: `query hash_password` (default
+   text) exits 0 and stdout contains `hash_password` + a `module.py` locator; `query hash_password
+   --format json` exits 0 and stdout parses via `serde_json::from_str` into a `Value` whose
+   stringified form contains `hash_password`. Proves Retriever → formatter wiring + the
+   `--format` flag.
+4. `update_command_reindexes_given_files` — init+index, assert `freshly_added_symbol` is NOT yet
+   queryable; write `fresh.py`; `codecache update fresh.py` exits 0; then `query
+   freshly_added_symbol` exits 0 and stdout contains `freshly_added_symbol` + `fresh.py`. Proves
+   the handler runs `Indexer::update_files` on the listed path.
+5. `config_command_reads_writes_settings` — after init: `config` (no args) exits 0 and prints
+   `max_db_size_mb` + the default `500`; `config storage.max_db_size_mb 1000` exits 0; `config`
+   again shows `1000`; AND `.codecache/config.toml` on disk contains `1000` (proves `Config::save`
+   persisted, D18).
+6. `serve_is_a_clean_stub` (optional, minimal) — after init, `codecache serve` does not leak a
+   Rust panic to stdout/stderr (no `panicked` substring). Exit code intentionally NOT pinned (M8
+   owns final serve semantics).
+
+**RED proof (`cargo test --test cli_tests`) — compiles, 6 passed / 5 failed for the right reason:**
+The file COMPILES (assert_cmd drives a subprocess; nothing new to import beyond `serde_json` /
+`tempfile` / `std::fs`). The 5 new handler tests FAIL because the M7.2 handlers are inert
+placeholders that print `"<cmd>: not yet implemented (M7.3)."` and exit 0 without creating a db,
+indexing, querying, or persisting config — purely behavioral, NOT a compile/API error.
+```
+test result: FAILED. 6 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out
+
+failures:
+    config_command_reads_writes_settings
+    index_then_status_reports_counts
+    init_creates_db_and_config
+    query_command_prints_formatted_results
+    update_command_reindexes_given_files
+
+# representative failure (each handler is still the M7.2 placeholder):
+status: not yet implemented (M7.3).   <- failed var.contains(0.1.0)
+config: not yet implemented (M7.3).   <- failed var.contains(max_db_size_mb)
+query:  not yet implemented (M7.3).   <- failed var.contains(hash_password)
+```
+The 6 that pass = the 5 M7.2 parsing tests (unchanged) + `serve_is_a_clean_stub` (the placeholder
+already prints a clean M8 notice with no panic). `cargo fmt --check` → exit 0 (workspace clean,
+incl. the extended test file). This is the correct RED. Hand to **principal-engineering-lead** for
+GREEN.
+
+**Spec ambiguity / GREEN guidance (for eng-lead + manager):**
+- **status layout vs. stored data:** §7.2's illustrative output shows Created / Last-index
+  timestamps and per-symbol_type (Functions/Classes/Methods) breakdowns that are NOT in the
+  schema (manager notes confirm). RED deliberately asserts ONLY version + total_files +
+  total_chunks (the aggregates that exist in `index_state`). GREEN may render the rest as
+  placeholders/omit them; the test won't break either way. A language breakdown is optional — if
+  added, derive its count from `files_metadata`; the RED does not require it. Flag the
+  timestamp/symbol_type gap as a follow-up (do NOT add schema columns this slice).
+- **config read output format:** the test asserts the value `500`/`1000` and the key token
+  `max_db_size_mb` appear in stdout; it does not pin TOML vs. Debug formatting. A `toml::to_string`
+  of the resolved `Config` (which the write path needs anyway for `Config::save`) satisfies both
+  the read assertion and matches §7.2's "print the whole resolved config".
+- **config write path:** `config storage.max_db_size_mb 1000` must mutate that nested scalar and
+  persist via `Config::save(&self, &Path)` without clobbering unrelated keys (§7.2 / D18). The RED
+  only pins this one dotted key — implement at least the `storage.max_db_size_mb` route; broader
+  key support is fine but not tested here.
+- **update path resolution:** the test passes a cwd-relative `fresh.py` with `.current_dir(root)`;
+  the handler must resolve positional `<FILE>` args against the working dir and feed them to
+  `Indexer::update_files`. (No glob is exercised — a concrete path is passed.)
+
 ## GREEN — engineering lead
 
 ### M7.1 — formatters — IMPLEMENTED 2026-06-12 · BLOCKED by a test-file compile bug (E0716)
@@ -423,6 +543,109 @@ No `--get/--set/--list` committed — left open for M7.3 to define without rewor
 
 Not committed. Hand back to manager → code-reviewer.
 
+### M7.3 — handlers + status — GREEN 2026-06-12
+
+**Files changed / added (production):**
+- `src/cli/mod.rs` — replaced the inert M7.2 placeholders with real dispatch. Added `mod {init,
+  index, update, query, status, config, serve, paths};` and `dispatch` now destructures each
+  `Command` variant and calls the matching handler (`update`/`query`/`status`/`config` receive
+  their resolved flags). Removed `not_yet_implemented`. The clap surface, `OutputFormat`/`Transport`
+  enums, and the `From<OutputFormat> for formatter::Format` seam are unchanged.
+- **Split handler files (one per command, each with a doc-comment header):**
+  - `src/cli/init.rs` — `current_dir()` → `crate::init(&root)`; prints a success line. `AppError` →
+    `anyhow` via `map_err(anyhow::Error::new)`.
+  - `src/cli/index.rs` — `current_dir()` → `crate::index(&root)`; prints
+    files/chunks/duration_ms from `IndexStats`.
+  - `src/cli/update.rs` — `paths::load_config` + `Storage::new(resolved db)` +
+    `Indexer::new(config, storage, root)` → `update_files(&resolved_paths)`; positional `<FILE>`
+    args resolved against cwd via `paths::resolve`. Prints the run stats.
+  - `src/cli/query.rs` — `Storage::new` + `Retriever::new` + `QueryOptions{max_tokens, max_results,
+    file_filter}`; `retriever.query(&q, opts)?` then `print!("{}", formatter::format(&qr, &q,
+    fmt))` with `fmt = OutputFormat::into()`. See the **empty-text deviation** below.
+  - `src/cli/status.rs` — reads `get_index_state("total_files"/"total_chunks")` (decimal → parse,
+    default 0), db file size via `fs::metadata().len()`, and a per-language file-count breakdown
+    from `all_indexed_files()` + `get_file_meta()` (FileMeta.language.as_str()). Prints a §7.2-style
+    block with the crate version.
+  - `src/cli/config.rs` — no `KEY` ⇒ `toml::to_string(&Config::load(...))` printed; `KEY VALUE` ⇒
+    load → `set_key` (matches `storage.max_db_size_mb`) → `Config::save(&config_path)`. Unknown key
+    / unparseable value / key-without-value ⇒ `bail!` (nonzero, no panic).
+  - `src/cli/serve.rs` — clean M8 stub (prints a notice, `Ok(())`); keeps `serve_is_a_clean_stub`
+    green.
+  - `src/cli/paths.rs` — shared helpers: `resolve(root, path)` (`root.join`, absolute honored),
+    `config_path(root)` = `<root>/.codecache/config.toml`, `load_config(root)` (→ anyhow, hints
+    `run codecache init`). Keeps db/config resolution consistent with `app`'s
+    `<root>/<config.storage.db_path>`.
+- `src/config/mod.rs` — **D18 additive:** `Config::save(&self, path: &Path) -> Result<(),
+  ConfigError>` (serialize full config via `toml::to_string`, write to `path`) + new
+  `ConfigError::Serialize { path, source: toml::ser::Error }` variant (Display + `source()` wired).
+  Added `save_then_load_round_trips` unit test (lib unit count 25 → 26).
+- `src/config/CLAUDE.md` — recorded the new `save` API + `Serialize` variant (same change).
+
+**`Config::save` signature + error variant chosen:**
+`pub fn save(&self, path: &Path) -> Result<(), ConfigError>`. Serialize failure →
+`ConfigError::Serialize { path, source }` (added a dedicated variant rather than overloading `Io`,
+so a TOML-encoding failure is distinguishable from a write failure); write failure reuses
+`ConfigError::Io`. No panic.
+
+**status fields shipped vs deferred:** shipped — `Version` (`CARGO_PKG_VERSION`), `Database` path +
+byte size, `Files` (total_files), `Chunks` (total_chunks), and a `Files by language` breakdown
+(derived from files_metadata). Deferred (NOT in the M1 schema; no columns added) — Created /
+Last-index timestamps and the per-symbol_type (Functions/Classes/Methods) breakdown; a code comment
+flags the follow-up.
+
+**`--file-filter` semantics shipped:** the given glob/path is wrapped as a single-entry
+`Some(vec![PathBuf::from(arg)])` and handed to `QueryOptions.file_filter`, which the retriever
+applies as an **exact `PathBuf` post-filter** (no glob expansion in v0.1). Documented in the handler
+doc-comment.
+
+**`config` semantics shipped:** read (no key) prints the whole resolved config as TOML; write
+(`KEY VALUE`) routes a small explicit match on dotted keys — at least `storage.max_db_size_mb` (the
+pinned key) — mutates that scalar and persists via `Config::save` (non-clobbering). Unknown key,
+unparseable value, or a `KEY` with no `VALUE` ⇒ `Err` (nonzero exit), no panic.
+
+**How each RED test passes:**
+1. `init_creates_db_and_config` — `init::run` calls `crate::init(cwd)` which writes
+   `.codecache/config.toml` + creates+`init_schema`s `.codecache/index.db`. Both `is_file()`.
+2. `index_then_status_reports_counts` — `index::run` populates the DB (restamps total_files=1,
+   total_chunks=3); `status::run` prints `Version: 0.1.0`, `Files: 1`, `Chunks: 3` → all `contains`
+   asserts (version, "Files", "1", "Chunks", "3") hold.
+3. `query_command_prints_formatted_results` — text: formatter output contains `hash_password`
+   (symbol) + `module.py` (locator); json: `formatter::format(.., Format::Json)` emits parseable
+   JSON whose stringified `Value` contains `hash_password`.
+4. `update_command_reindexes_given_files` — before: `freshly_added_symbol` not indexed ⇒ empty
+   result; after writing `fresh.py` + `update fresh.py` (runs `Indexer::update_files`), the symbol
+   + `fresh.py` locator appear. See the deviation below for how the "before" assertion is met.
+5. `config_command_reads_writes_settings` — read shows `max_db_size_mb`/`500`; `config
+   storage.max_db_size_mb 1000` writes via `Config::save`; re-read shows `1000`; on-disk
+   `config.toml` contains `1000`.
+6. `serve_is_a_clean_stub` — `serve::run` prints an M8 notice, no panic.
+
+**Deviation (raised for the record, no test/golden weakened):** the M7.1 TEXT formatter always
+echoes `Query: "<q>"` in its header (committed golden). That made the `update` test's *before*
+assertion — `query freshly_added_symbol` (default text) `contains("freshly_added_symbol").not()` —
+impossible via a straight formatter pass-through, since the header would echo the searched symbol
+even with zero results. I did **not** touch the locked formatter or the golden, and did **not**
+weaken the test. Resolution is **handler-level and minimal**: when the result set is empty AND the
+format is `Text`, `query::run` prints a query-free `No results found.` instead of the formatter's
+query-echoing empty header. JSON always pipes through the formatter (output must stay parseable);
+TOON's empty output is already an empty (query-free) string, so only empty-Text is special-cased.
+Non-empty results are unaffected (still piped through the formatter). Flagging for the
+manager/test-lead: if a future slice wants the empty human-readable output to echo the query, that
+test would need revisiting — but as written, RED #4's before-check requires a query-free empty
+report.
+
+**Gate output (Rust 1.85):**
+- `cargo build` → ok.
+- `cargo test --test cli_tests` → 11 passed; 0 failed (5 M7.2 parsing + 5 M7.3 handlers + serve stub).
+- `cargo test --all` → all green, no regressions: lib 26 (+1 `save_then_load_round_trips`),
+  cli_tests 11, formatter 6, config (lib), e2e_index 4, hasher 11, indexer 15, parser 14, chunker
+  10, chunker_proptest 3, retriever 12, storage 18, smoke 1.
+- `cargo clippy --all-targets -- -D warnings` → clean (exit 0).
+- `cargo fmt --check` → clean (exit 0).
+
+No reachable `unwrap()/expect()/panic!` in any handler (all errors via `?` / `map_err(anyhow::...)`
+/ `bail!`). Not committed. Hand back to manager → code-reviewer.
+
 ## Specialist / Perf notes
 <skeleton-line / signature-extraction edge cases if routed to rust-treesitter-specialist; no gated perf>
 
@@ -519,6 +742,93 @@ Non-actionable notes:
 Slice M7.2 is APPROVED. Manager: mark DONE once docs/TODO.md Phase 7 + src/cli/CLAUDE.md status are
 updated in the same change (cli/CLAUDE.md still reads the M0-stub status / "Full clap dispatch lands
 at M7").
+
+### M7.3 — handlers + status — VERDICT: APPROVE (2026-06-12, code-reviewer)
+
+Reviewed the new `src/cli/{init,index,update,query,status,config,serve}.rs` + `src/cli/paths.rs`,
+the `dispatch` rewrite in `src/cli/mod.rs`, the additive `Config::save`/`ConfigError::Serialize`
+in `src/config/mod.rs`, and the appended M7.3 RED block in `tests/cli_tests.rs`, against §7.2/§7.3,
+ROADMAP D18, and the shipped module APIs.
+
+Gates re-run independently on Rust 1.85 (clean):
+- `cargo fmt --check` -> exit 0.
+- `cargo clippy --all-targets -- -D warnings` -> exit 0 (forced fresh on the touched files).
+- `cargo test --all` -> all green: cli_tests 11, lib 26 (incl. config::save_then_load_round_trips),
+  config 5, formatter 6, retriever 12, storage 18, indexer 15, parser 14, chunker 10,
+  chunker_proptest 3, e2e_index 4, hasher 11, smoke 1. No regression.
+
+Delegation correctness (verified against real signatures):
+- init -> `codecache::init(&cwd)`; index -> `codecache::index(&cwd)`; update ->
+  `Indexer::new(config, storage, root).update_files(&resolved)`; query -> `Retriever::new(storage)
+  .query(...)` + `formatter::format`; status -> `Storage::get_index_state("total_files"/
+  "total_chunks")` (exactly the keys `Indexer::reconcile` stamps) + `all_indexed_files` +
+  `get_file_meta`; config -> `Config::load`/`save`. Path resolution in `paths::resolve`
+  (`root.join(path)`) matches `app::resolve_db_path` (`project_root.join(config.storage.db_path)`),
+  so CLI and facade agree on `<root>/.codecache/index.db`.
+
+No reachable `unwrap()/expect()/panic!` in any cli handler or `Config::save`. The only fallible-
+looking spots are safe: status `metadata(...).map(..).unwrap_or(0)` and `read_count`'s
+`.and_then(parse).unwrap_or(0)` (parse-of-index_state strings degrades to 0, never panics);
+config `parse` maps `FromStr::Err` via `map_err`; `Config::save` is `map_err` throughout.
+
+D18 (`Config::save`): additive only — `load` and the schema are untouched; re-serializes the WHOLE
+config via `toml::to_string` (non-clobbering, unrelated keys survive a single-key edit); serialize
+failure -> `ConfigError::Serialize { path, source: toml::ser::Error }`, write failure -> existing
+`Io`. `ConfigError` still impls Error/Display with the new variant in the `source()` chain. The
+`save_then_load_round_trips` unit test genuinely round-trips (sets max_db_size_mb=1000, save, load,
+asserts the value AND full `Config` equality).
+
+status: reports version + Files + Chunks + db size + per-language counts from real data;
+correctly DEFERS Created/Last-index + per-symbol_type with a follow-up note. No schema/migration
+crept in (confirmed: no new columns; counts come from existing index_state + files_metadata).
+
+Empty-text deviation (the flagged judgment call) — ASSESSED, APPROVE-able as-is:
+- (a) LEGITIMATE handler-level UX choice, not a correctness bug. Piping an empty result through the
+  text formatter prints the `Query: "<q>"` header echo (per `query_empty.txt`); for RED #4's pre-
+  update assertion `stdout(contains("freshly_added_symbol").not())`, that echo WOULD contain the
+  searched symbol and fail the test. The `No results found.` short-circuit is load-bearing. It does
+  introduce a divergence: the CLI text-empty output no longer matches the M7.1 `query_empty.txt`
+  golden shape. That golden is a *formatter* unit golden (still valid for `formatter::format`); the
+  CLI simply chooses not to render it for empty+text. The plan (§6.4.3) does not specify an empty-
+  result text shape, so this contradicts no spec.
+- (b) JSON ALWAYS pipes through the formatter (guard is `fmt == Format::Text` only) -> always
+  parseable. Confirmed + pinned by `query_command_prints_formatted_results`.
+- (c) TOON empty stays the query-free empty string (guard doesn't touch TOON; `toon::render` emits
+  "" for empty). Confirmed.
+- (d) Does NOT mask a real "query echoed" expectation: text echo is preserved for NON-empty results
+  (header still rendered), and no test asserts the query is echoed on the empty-text path. The
+  divergence is scoped strictly to empty+text.
+  Recommended (NON-blocking) follow-up: either (i) document the empty+text CLI notice in
+  cli/CLAUDE.md + §7.2 so the formatter-golden vs CLI divergence is intentional and discoverable, or
+  (ii) later give the text formatter a query-free empty rendering and drop the handler special-case.
+  Not required for this slice.
+
+Test integrity: the `tests/cli_tests.rs` diff is PURELY ADDITIVE — the M7.3 RED block (6 tests:
+init/status/query/update/config + serve stub) was appended; the M7.2 parsing tests above are
+byte-for-byte unchanged. No assertion weakened. Tests exercise real behavior end-to-end (files on
+disk, exact 1-file/3-chunk counts, symbol retrieved + file:line locator, JSON parsed, targeted
+update makes a new symbol queryable, config write persisted to config.toml). The eng-lead did not
+edit the tests to pass.
+
+Idiomatic Rust / boundaries: handlers are thin; no retrieval/format/index logic duplicated in cli;
+clap types stay in `mod.rs` (`OutputFormat`/`Transport` + `From` seam); `paths.rs` centralizes
+resolution; deterministic `BTreeMap` for the language breakdown; borrows over clones (only the
+necessary `root.clone()` for `Indexer::new` ownership). No new production deps.
+
+Findings: none (blocker/major/minor).
+
+Non-actionable notes:
+- init/index/update/query/status/config each re-resolve cwd + (for several) re-open Storage per
+  invocation — correct for a one-shot CLI process; no shared-handle concern this slice.
+- `--db-path` on init is not yet threaded into the facade (default path only); documented as a
+  follow-up in init.rs and exercised only at the default by the tests. Acceptable — no test pins a
+  non-default init db-path, and the facade resolves db_path from config.
+- config `--db-path` is accepted but unused by the handler (`_db_path`) since config lives at
+  `.codecache/config.toml`, independent of the db; forward-compatible, in-spec.
+
+Slice M7.3 is APPROVED. Manager: mark DONE once docs/TODO.md Phase 7 is updated (cli/CLAUDE.md +
+config/CLAUDE.md status already reflect M7.3). Consider filing the empty+text doc follow-up above.
+
 
 ## OUTCOME — manager
 <per-slice: aligned? TODO + module CLAUDE.md updated? committed? follow-ups?>

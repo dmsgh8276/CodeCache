@@ -313,8 +313,12 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       protocol; Layer-2 cumulative tokens + turns-to-coverage). $1K R3 spend NOT authorized — single-task
       wiring runs on a free/local or deterministic model. Brief: `.claude/briefs/BRIEF-R1-harness.md`.
       - [x] D22 ratified; ROADMAP D22 → Adopted; TODO/brief updated.
-      - [ ] Offline core (no API): Python scorer port + unit tests; JSONL trajectory schema/logger;
-            `codecache` tool adapter (shells to the built binary); one task from the M10.2 gold; A0/A1/A4 defs.
+      - [x] Offline core under `research/r1_harness/` (no API): Python scorer port (`scorer.py`, mirrors
+            `retrieval_quality.rs`) + JSONL trajectory schema/Layer-2 extraction (`trajectory.py`) +
+            corpus materialiser (`corpus.py`) + `codecache` tool adapter (`codecache_tool.py`, shells to
+            the built binary) + A0/A1/A4 + task defs (`arms.py`, `tasks/auth_q1.json`). **32 pytest tests
+            green**; end-to-end vs the real binary: gold `authenticate_user` retrieved at rank 1
+            (Recall@1 file+block = 1.0).
       - [ ] Vendor mini-SWE-agent (pin 2.4.1); runner builds mini's loop with the tool-enabled env per arm.
       - [ ] End-to-end wiring validated offline via mini's DeterministicModel (3 logs + metrics report).
       - [ ] (gated) live-model run — needs a model-backend decision (free/local vs a paid key).

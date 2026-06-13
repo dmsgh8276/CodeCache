@@ -1,0 +1,14 @@
+[project]
+name = "codecache-r1-harness"
+version = "0.0.1"
+description = "R1 eval harness for CodeCache: same-agent retrieval-interface ablation (A0/A1/A4). Research-only; out-of-crate (ROADMAP D22)."
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"

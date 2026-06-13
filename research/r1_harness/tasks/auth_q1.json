@@ -1,0 +1,11 @@
+{
+  "task_id": "auth_q1",
+  "corpus_id": "auth_module",
+  "query": "authenticate user credentials",
+  "query_type": "keyword",
+  "note": "R1 single-task exit. Gold mirrors tests/fixtures/retrieval_quality/micro_suite.json auth_module/auth_q1 verbatim (one gold source, two scorers — D21). A correct agent must read authenticate_user to answer 'how are user credentials authenticated?'.",
+  "gold_files": ["src/auth/authenticate.py"],
+  "gold_blocks": [
+    { "file_path": "src/auth/authenticate.py", "symbol_name": "authenticate_user" }
+  ]
+}

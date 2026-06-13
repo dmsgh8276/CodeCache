@@ -1,0 +1,14 @@
+# R1 eval-harness dependencies (research-only; out-of-crate; not a Rust dependency).
+#
+# The offline core (r1harness.scorer / .trajectory / .corpus / .codecache_tool)
+# needs only the Python stdlib + pytest. mini-swe-agent is required only by the
+# runner (the agent loop) — it is the forked agent harness (D22).
+#
+# Pinned for reproducibility (R4 artifact). mini-swe-agent 2.4.1 is the verified
+# latest release (2026-06-11, MIT). It transitively pulls litellm, pydantic,
+# datasets, textual, etc. — a large tree; install only when running the agent.
+
+mini-swe-agent==2.4.1
+
+# Dev / test:
+pytest>=8.0

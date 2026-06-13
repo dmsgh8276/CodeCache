@@ -1,0 +1,15 @@
+# R1 harness — local artifacts (research-only; never committed)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+
+# Trajectory logs + materialised corpora + metric reports from runs
+runs/
+*.jsonl
+
+# Vendored mini-swe-agent checkout (installed via requirements.txt, not committed)
+vendor/

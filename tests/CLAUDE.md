@@ -14,6 +14,7 @@ directory holds the wider integration/E2E/property surface.
 | `smoke_test.rs` | M0 smoke test: crate links; `codecache::VERSION == CARGO_PKG_VERSION`. | M0 |
 | `parser_tests.rs` | M3 parser integration: exact byte spans, method/decorator/nested, ERROR-rate (D2). | M3 |
 | `parser_ts_tests.rs` | M9.1 TypeScript parser: function/arrow/class/method exact spans, generics, type-only no-panic, D2 parity. | M9 |
+| `parser_go_tests.rs` | M9.2 Go parser: function/method(receiver→parent)/struct exact spans, package+imports no spurious chunks, D2 parity. | M9 |
 | `chunker_tests.rs` | M4 chunker integration: AST→Chunk, D3 enrichment, D2 heuristic fallback flag. | M4 |
 | `chunker_proptest.rs` | M4 property: spans in-bounds; chunks disjoint-or-nested; child contained in parent. | M4 |
 | `storage_tests.rs` | M1 storage integration: schema idempotency, chunk round-trip CRUD, BM25/MATCH ordering, empty-DB/error paths. + M8.3 D19 `symbols_for_path` (exact-file / directory-prefix / unknown-path ordering). | M1/M8 |
@@ -59,6 +60,23 @@ already covered language-agnostically in `crlf_function.py`).
 | `type_only.ts` | `interface Shape` + `type Pair<T>` + generic fn `makePair` + class `Circle` (interfaces/aliases NOT emitted as chunks; no panic; real fn/class found). | LF |
 | `high_error.ts` | mostly garbage → ERROR-rate above `HEURISTIC_FALLBACK_THRESHOLD` (D2 parity). | LF |
 | `async_function.ts` | `async function fetchData(...)` (async keyword inside span). | LF |
+
+### `fixtures/go/` (M9.2 parser)
+Minimal, purpose-built Go files loaded by `parser_go_tests.rs`. Span assertions compare
+`&source[start_byte..end_byte]` to the expected text, so the exact bytes (incl. newlines + the
+gofmt-style leading **tab** indentation) matter — do not reformat these. All LF (CRLF is covered
+language-agnostically in `crlf_function.py`). Note the Go method-receiver rule: `func (s *Server)
+Handle(...)` ⇒ `SymbolType::Method` with `parent_symbol = Some("Server")` — the receiver TYPE name,
+stripped of the pointer `*` and the receiver variable `s`. §5.3 lists no query for Go interfaces,
+so interfaces are NOT emitted as chunks in v0.1.
+
+| File | Purpose | Newlines |
+|---|---|---|
+| `top_level_function.go` | single top-level `func Foo(name string) string` (Function, parent None; lines 3-5). | LF |
+| `method_with_receiver.go` | `type Server struct{...}` + `func (s *Server) Handle(...)` (Method, parent=`Server`, lines 7-9; struct `Server` also emitted). | LF |
+| `struct_type.go` | `type Point struct {...}` (Struct, lines 3-6). | LF |
+| `package_and_imports.go` | `package main` + `import (...)` + `func Run(...)` (only `Run` extracted, lines 8-10; package/import → no chunks). | LF |
+| `high_error.go` | mostly garbage → ERROR-rate above `HEURISTIC_FALLBACK_THRESHOLD` (D2 parity). | LF |
 
 Integration tests for storage round-trips (M1), parser fixtures (M3), chunker non-overlap
 property (M4), indexer idempotency (M5), retriever ranking/budget (M6), formatter goldens +

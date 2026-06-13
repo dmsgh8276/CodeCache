@@ -31,9 +31,9 @@ pub const HEURISTIC_FALLBACK_THRESHOLD: f32;          // 0.20 (D2)
 pub enum ParserError { UnsupportedLanguage(Language), Language(..), Query(..), ParseFailed{path} }
 // ParserError: std::error::Error with source() chaining the underlying tree-sitter error.
 ```
-Files: `mod.rs` (the above), `python.rs` / `typescript.rs` (each a `LanguageConfig` = grammar +
-queries), `queries/python.scm` + `queries/typescript.scm` (§5.3 S-expression queries). Go lands
-at M9.2.
+Files: `mod.rs` (the above), `python.rs` / `typescript.rs` / `go.rs` (each a `LanguageConfig` =
+grammar + queries), `queries/python.scm` + `queries/typescript.scm` + `queries/go.scm` (§5.3
+S-expression queries). All three v0.1 languages wired.
 
 ## Design notes
 - **Extraction = `TreeCursor` walk, not `QueryCursor`.** The `.scm` queries are compiled and
@@ -46,10 +46,16 @@ at M9.2.
 - **Method vs function:** nearest *definition* ancestor decides — `class_definition` ⇒ `Method`
   (parent = class); `function_definition` ⇒ nested `Function` (parent = enclosing fn).
 - **Per-language extraction dispatch (M9):** the `TreeCursor` walk calls `recognize_definition`,
-  which `match`-dispatches on `Language` to `recognize_python` / `recognize_typescript` and returns
-  a `Definition { span_node, name, symbol_type }` fed to the shared `build_chunk` /
-  `extend_to_line_end` / `field_text` / `node_text` helpers. Adding a language = one recognizer +
-  one config + one `.scm`; the span/line/D2 machinery is language-agnostic and reused unchanged.
+  which `match`-dispatches on `Language` to `recognize_python` / `recognize_typescript` /
+  `recognize_go` and returns a `Definition { span_node, name, symbol_type, parent_override }` fed to
+  the shared `build_chunk` / `extend_to_line_end` / `field_text` / `node_text` helpers. Adding a
+  language = one recognizer + one config + one `.scm`; the span/line/D2 machinery is
+  language-agnostic and reused unchanged.
+- **`parent_override` (M9.2):** `parent_symbol` is normally the nearest *lexical* definition
+  ancestor (threaded down the walk). Go method receivers are an exception — the parent type is not a
+  lexical ancestor — so `Definition.parent_override` lets a recognizer set the parent explicitly;
+  `collect_chunks` uses `def.parent_override.or(parent)`. Python/TS recognizers always set it `None`,
+  so their behavior is byte-for-byte unchanged.
 - **TypeScript (M9.1):** `function_declaration` (incl. `async`) ⇒ `Function`; a `variable_declarator`
   whose `value` is an `arrow_function` ⇒ `Function` named by the declarator identifier, **span = the
   declarator** (excludes the `const`/`let` keyword); `class_declaration` ⇒ `Class`;
@@ -59,6 +65,15 @@ at M9.2.
   inside the declaration node so spans are unaffected. **Interfaces / type aliases are NOT emitted
   as chunks** in v0.1 (§5.3 lists no query for them) — they only must not panic. No `SymbolType`
   variant was added.
+- **Go (M9.2):** `function_declaration` ⇒ `Function`; `method_declaration` ⇒ `Method` with
+  `parent_symbol` = the **receiver type name** (`go_receiver_type_name` drills receiver →
+  `parameter_declaration` → `type:`, descends through a `pointer_type` so `*Server` and `Server`
+  both yield `Server`, ignoring the receiver var — set via `parent_override`); a `type_declaration`
+  whose `type_spec`'s `type:` is a `struct_type` ⇒ `SymbolType::Struct` (span node = the
+  `type_declaration`, so the span starts at the `type` keyword). Grammar = `tree_sitter_go::LANGUAGE`.
+  Package clauses, import declarations, and **interfaces are NOT emitted** as chunks (§5.3 lists no
+  Go interface query). No `SymbolType` variant added. Go closures are `func_literal` (no recognizer
+  arm) so they never double-emit.
 - **Span exactness:** byte spans satisfy `&source[start..end] == chunk_text`; the span is
   extended to include the single trailing line terminator (`\n` / `\r\n`, CRLF preserved) that
   closes the def's last line; multibyte identifiers stay on UTF-8 boundaries. `start_line`/
@@ -79,7 +94,9 @@ fallback and the `heuristic` chunk flag are **owned by M4** (chunker), enforced 
   out of M9.1 fixture scope; reviewer minor).
 
 ## Status
-**M3: GREEN (2026-06-10).** Python. **M9.1: GREEN (2026-06-12).** TypeScript added
-(`function_declaration`/arrow/`class_declaration`/`method_definition`, §5.3). 14 Python + 7 TS
-integration tests + 3 unit tests pass; full suite 173 green; all four gates clean on Rust 1.85.0.
-Go lands at M9.2.
+**M3: GREEN (2026-06-10).** Python. **M9.1: GREEN (2026-06-12).** TypeScript
+(`function_declaration`/arrow/`class_declaration`/`method_definition`). **M9.2: GREEN (2026-06-12).**
+Go (`function_declaration`/`method_declaration`+receiver/struct → `Struct`). All three v0.1
+languages wired (§5.3). 14 Python + 7 TS + 5 Go integration tests + unit tests pass; **full suite
+179 green**; all four gates clean on Rust 1.85.0. M9.3 validates the mixed-language pipeline through
+the indexer.

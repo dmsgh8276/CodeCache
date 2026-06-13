@@ -33,6 +33,7 @@ use tree_sitter::{Node, Query, Tree};
 
 use crate::types::{Chunk, Language, SymbolType};
 
+mod go;
 mod python;
 mod typescript;
 
@@ -134,6 +135,10 @@ impl Parser {
         Query::new(&ts.grammar, ts.queries)?;
         language_configs.insert(Language::TypeScript, ts);
 
+        let go = go::config();
+        Query::new(&go.grammar, go.queries)?;
+        language_configs.insert(Language::Go, go);
+
         Ok(Self {
             ts_parser: tree_sitter::Parser::new(),
             language_configs,
@@ -198,13 +203,16 @@ fn collect_chunks(
         // if so, which node to span, what symbol type it is, and the name to carry to its children.
         match recognize_definition(child, lang, source) {
             Some(def) => {
+                // A recognizer may override the parent symbol (Go methods → receiver type name);
+                // otherwise the chunk's parent is the nearest enclosing definition (threaded down).
+                let chunk_parent = def.parent_override.or(parent);
                 if let Some(chunk) = build_chunk(
                     def.span_node,
                     def.name,
                     def.symbol_type,
                     lang,
                     file_path,
-                    parent,
+                    chunk_parent,
                     source,
                 ) {
                     out.push(chunk);
@@ -220,10 +228,15 @@ fn collect_chunks(
 }
 
 /// A recognized definition: the node whose byte span the chunk uses, the symbol name, and its type.
+///
+/// `parent_override` lets a recognizer set the chunk's `parent_symbol` directly rather than using
+/// the nearest enclosing definition threaded by the walk — needed for Go methods, whose parent is
+/// the receiver TYPE name (`func (s *Server) Handle()` → `Server`), not a lexical ancestor.
 struct Definition<'a> {
     span_node: Node<'a>,
     name: &'a str,
     symbol_type: SymbolType,
+    parent_override: Option<&'a str>,
 }
 
 /// Decide whether `node` is a definition the given `lang` emits as a [`Chunk`]. Returns the span
@@ -236,8 +249,7 @@ fn recognize_definition<'a>(
     match lang {
         Language::Python => recognize_python(node, source),
         Language::TypeScript => recognize_typescript(node, source),
-        // Go lands at M9.2; no other language is wired yet.
-        Language::Go => None,
+        Language::Go => recognize_go(node, source),
     }
 }
 
@@ -257,12 +269,14 @@ fn recognize_python<'a>(node: Node<'a>, source: &'a str) -> Option<Definition<'a
                 span_node: python_span_node_for(node),
                 name,
                 symbol_type,
+                parent_override: None,
             })
         }
         "class_definition" => Some(Definition {
             span_node: python_span_node_for(node),
             name: field_text(node, "name", source)?,
             symbol_type: SymbolType::Class,
+            parent_override: None,
         }),
         _ => None,
     }
@@ -279,6 +293,7 @@ fn recognize_typescript<'a>(node: Node<'a>, source: &'a str) -> Option<Definitio
             span_node: node,
             name: field_text(node, "name", source)?,
             symbol_type: SymbolType::Function,
+            parent_override: None,
         }),
         // Only declarators whose value is an arrow function are emitted (named by the identifier).
         "variable_declarator"
@@ -290,12 +305,14 @@ fn recognize_typescript<'a>(node: Node<'a>, source: &'a str) -> Option<Definitio
                 span_node: node,
                 name: field_text(node, "name", source)?,
                 symbol_type: SymbolType::Function,
+                parent_override: None,
             })
         }
         "class_declaration" => Some(Definition {
             span_node: node,
             name: field_text(node, "name", source)?,
             symbol_type: SymbolType::Class,
+            parent_override: None,
         }),
         "method_definition" => Some(Definition {
             span_node: node,
@@ -305,9 +322,77 @@ fn recognize_typescript<'a>(node: Node<'a>, source: &'a str) -> Option<Definitio
             } else {
                 SymbolType::Function
             },
+            parent_override: None,
         }),
         _ => None,
     }
+}
+
+/// Go (§5.3): `function_declaration` → Function (top-level, `parent_symbol = None`);
+/// `method_declaration` (the `func` form WITH a `receiver:`) → Method whose `parent_symbol` is the
+/// receiver TYPE name (pointer `*` and receiver variable stripped, e.g. `(s *Server)` → `Server`);
+/// `type_declaration` wrapping a `type_spec` whose `type` is a `struct_type` → Struct, spanned from
+/// the `type_declaration` so the span starts at the `type` keyword. The package clause and import
+/// declarations have no arm, so they are never emitted. Interfaces are out of scope in v0.1.
+fn recognize_go<'a>(node: Node<'a>, source: &'a str) -> Option<Definition<'a>> {
+    match node.kind() {
+        "function_declaration" => Some(Definition {
+            span_node: node,
+            name: field_text(node, "name", source)?,
+            symbol_type: SymbolType::Function,
+            parent_override: None,
+        }),
+        "method_declaration" => Some(Definition {
+            span_node: node,
+            name: field_text(node, "name", source)?,
+            symbol_type: SymbolType::Method,
+            // The method's parent is the receiver TYPE name (`(s *Server)` → `Server`), not a
+            // lexical ancestor. If the drill fails on a malformed tree, fall back to no parent.
+            parent_override: go_receiver_type_name(node, source),
+        }),
+        // A `type X struct {...}` declaration: only emit when the `type_spec`'s `type` field is a
+        // `struct_type`. The span node is the `type_declaration` (so it starts at the `type`
+        // keyword), per §5.3 / the RED test's expected bytes.
+        "type_declaration" => {
+            let mut walk = node.walk();
+            let type_spec = node.children(&mut walk).find(|c| c.kind() == "type_spec")?;
+            let type_node = type_spec.child_by_field_name("type")?;
+            if type_node.kind() != "struct_type" {
+                return None;
+            }
+            Some(Definition {
+                span_node: node,
+                name: field_text(type_spec, "name", source)?,
+                symbol_type: SymbolType::Struct,
+                parent_override: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The receiver TYPE name of a Go `method_declaration`, used as the method's `parent_symbol`.
+/// Drills `method_declaration` → `receiver:` parameter_list → first `parameter_declaration` →
+/// `type:`; if that type is a `pointer_type`, descends to its inner `type_identifier`. Returns
+/// `None` (no panic) if any step is missing, so the method still emits with `parent_symbol = None`.
+fn go_receiver_type_name<'a>(method: Node, source: &'a str) -> Option<&'a str> {
+    let receiver = method.child_by_field_name("receiver")?;
+    let mut walk = receiver.walk();
+    let decl = receiver
+        .children(&mut walk)
+        .find(|c| c.kind() == "parameter_declaration")?;
+    let type_node = decl.child_by_field_name("type")?;
+    let ident = if type_node.kind() == "pointer_type" {
+        // `*Server`: descend to the inner `type_identifier`.
+        let mut inner_walk = type_node.walk();
+        let found = type_node
+            .children(&mut inner_walk)
+            .find(|c| c.kind() == "type_identifier");
+        found?
+    } else {
+        type_node
+    };
+    node_text(ident, source)
 }
 
 /// The Python span node: the enclosing `decorated_definition` (so `@decorator` lines are included)
@@ -494,5 +579,16 @@ mod tests {
     fn queries_compile_against_grammar() {
         // `Parser::new` validates the embedded `.scm`; surfacing it as a test documents the seam.
         assert!(Parser::new().is_ok());
+    }
+
+    #[test]
+    fn unsupported_language_error_displays_typed_message() {
+        // All three v0.1 `Language` variants are now wired (M9), so `parse_file` no longer rejects
+        // any of them — but `ParserError::UnsupportedLanguage` is still live public API: it is the
+        // typed error a future, not-yet-wired language would hit before its grammar lands. Keep the
+        // variant and its Display under test as the intentional forward-compat contract.
+        let e = ParserError::UnsupportedLanguage(crate::types::Language::Go);
+        assert!(matches!(e, ParserError::UnsupportedLanguage(_)));
+        assert_eq!(e.to_string(), "unsupported language for parsing: go");
     }
 }

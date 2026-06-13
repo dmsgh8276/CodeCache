@@ -135,15 +135,32 @@ fn parse_empty_file_expects_empty_tree_no_panic() {
 }
 
 #[test]
-fn unsupported_language_expects_typed_error() {
-    // v0.1 parser only wires the Python grammar (M3). Asking it to parse another language must
-    // return a typed Err, not panic and not silently mis-parse.
+fn all_v01_languages_parse_supported() {
+    // M9 EXIT GUARANTEE: v0.1 language coverage is Python / TypeScript / Go. M3 wired only Python
+    // (and this test used to assert "Go is unsupported"); M9.1 wired TypeScript and M9.2 wired Go,
+    // so all three `Language` variants now parse to a tree. This replaces the now-false
+    // "Go unsupported" claim with the real coverage guarantee — every supported v0.1 language must
+    // `parse_file` to `Ok`, not panic and not silently mis-parse. (The typed `UnsupportedLanguage`
+    // error path is still covered as a focused unit test in `src/parser/mod.rs`.)
     let mut parser = Parser::new().expect("Parser::new");
-    let result = parser.parse_file(Path::new("main.go"), "package main\n", Language::Go);
-    assert!(
-        result.is_err(),
-        "an unsupported language (Go at M3) must return a typed Err"
-    );
+    let cases = [
+        (Path::new("m.py"), "def f():\n    pass\n", Language::Python),
+        (Path::new("m.ts"), "function f() {}\n", Language::TypeScript),
+        (
+            Path::new("m.go"),
+            "package main\nfunc F() {}\n",
+            Language::Go,
+        ),
+    ];
+    for (path, content, lang) in cases {
+        let tree = parser
+            .parse_file(path, content, lang)
+            .unwrap_or_else(|e| panic!("supported language {lang:?} must parse to Ok, got {e}"));
+        assert!(
+            !tree.root_node().has_error(),
+            "valid {lang:?} snippet must parse without ERROR nodes"
+        );
+    }
 }
 
 // ═════════════════ Slice M3.2 — exact byte spans + symbol typing ════════════

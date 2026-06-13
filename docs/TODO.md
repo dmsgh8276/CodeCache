@@ -239,7 +239,13 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       Python regression; **173 tests green**, all four gates clean (Rust 1.85). Reviewer APPROVED.
       Decisions: `LANGUAGE_TYPESCRIPT` grammar (`.tsx`/JSX deferred); interfaces/type-aliases not
       emitted as chunks; no enum change. Follow-up: TS destructuring-declarator guard (parser CLAUDE.md).
-- [ ] M9.2 Go — `src/parser/go.rs` + `queries/go.scm`: funcs, methods w/ receiver, struct → `Struct`.
+- [x] **M9.2 Go** — `src/parser/go.rs` + `queries/go.scm` + `recognize_go` arm (§5.3):
+      `function_declaration` → Function, `method_declaration` → Method with receiver-type
+      `parent_symbol` (pointer-stripped, via `Definition.parent_override`), `type_declaration`/
+      `struct_type` → `SymbolType::Struct`. Package/import/interface not emitted. D2 parity, D7
+      lines. 5 `parser_go_tests`; repointed the stale M3 `Go-unsupported` test to
+      `all_v01_languages_parse_supported` + new unit test for the `UnsupportedLanguage` Display
+      contract (no coverage lost). **179 tests green**, all four gates clean (Rust 1.85). Reviewer APPROVED.
 - [ ] M9.3 cross-language integration: mixed repo indexes Python/TS/Go; language filter respected.
 
 ## Phase 10 — Benchmarks + Release (M10) · plan: [plans/M10-benchmarks-release.md](plans/M10-benchmarks-release.md)

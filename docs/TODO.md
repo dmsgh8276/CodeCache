@@ -306,8 +306,18 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
         the `v0.1.0` tag to trigger `release.yml`.
 
 ## Research track (R1–R4, post-M8; M9 can interleave) · spec: [`../project_overview.md`](../project_overview.md) §5–§6 · ROADMAP "Research track"
-- [ ] **R1 harness**: agent loop with pluggable retrieval tools; trajectory logging; ContextBench
-      gold-context scorer; exit = one task end-to-end in arms A0/A1/A4 → manager to brief (new ownership)
+- [~] **R1 harness** (D22 ratified 2026-06-13; main session drives): fork mini-SWE-agent (Python, MIT);
+      out-of-crate under `research/r1_harness/`; process boundary to the Rust binary (no FFI, no new crate
+      dep). Exit = one gold-labeled task end-to-end in arms A0/A1/A4 + a metrics report computed from the
+      trajectory logs (Layer-1 Recall@k/Precision@k/F1 file+block via a Python port of the M10.2 scorer
+      protocol; Layer-2 cumulative tokens + turns-to-coverage). $1K R3 spend NOT authorized — single-task
+      wiring runs on a free/local or deterministic model. Brief: `.claude/briefs/BRIEF-R1-harness.md`.
+      - [x] D22 ratified; ROADMAP D22 → Adopted; TODO/brief updated.
+      - [ ] Offline core (no API): Python scorer port + unit tests; JSONL trajectory schema/logger;
+            `codecache` tool adapter (shells to the built binary); one task from the M10.2 gold; A0/A1/A4 defs.
+      - [ ] Vendor mini-SWE-agent (pin 2.4.1); runner builds mini's loop with the tool-enabled env per arm.
+      - [ ] End-to-end wiring validated offline via mini's DeterministicModel (3 logs + metrics report).
+      - [ ] (gated) live-model run — needs a model-backend decision (free/local vs a paid key).
 - [ ] **R2 offline ablations**: Layer-1 sweeps (chunking × ranking × enrichment) on
       ContextBench-Lite + RepoEval slice; reproduce published BM25 baselines → perf + specialist
 - [ ] **R3 agent-in-loop study**: full A0–A5 matrix on 30–50 tasks → promote winners to 100;

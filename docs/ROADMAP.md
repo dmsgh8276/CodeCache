@@ -405,12 +405,13 @@ real ContextBench-Lite corpus + the full 5×~15 micro-suite using this scorer; a
 manager (this decision) + performance-bench-engineer (scorer) — recorded in
 `.claude/briefs/BRIEF-M10-benchmarks-release.md`.
 
-### D22 — R1 eval-harness: fork mini-SWE-agent; main session drives; smallest single-task R1  · **PROPOSED — pending human ratification** (plan: research track R1) — *overview §4.2, §5–§7; spike: `.claude/briefs/BRIEF-R1-harness.md`*
+### D22 — R1 eval-harness: fork mini-SWE-agent; main session drives; smallest single-task R1  · **Adopted 2026-06-13 (human-ratified)** (plan: research track R1) — *overview §4.2, §5–§7; spike: `.claude/briefs/BRIEF-R1-harness.md`*
 
-> **Held open exactly like D15 was** (spike → human ratify → build). The R1-entry spike is complete;
-> the disposition below is the manager's recommendation and is **NOT yet adopted/ratified**. R1 is not
-> started until a human ratifies. The ~$1K R3 API spend and any paid benchmark/API access remain
-> **separate downstream human gates** — not part of this proposal.
+> **Spike → human ratify → build (the D15 pattern), now ratified.** The R1-entry spike is complete and
+> the disposition below was **ratified by the human on 2026-06-13**; R1 build is underway, driven by the
+> main session. The ~$1K R3 API spend and any paid benchmark/API access remain **separate downstream
+> human gates** — not authorized by this ratification (R1's single-task wiring runs on a free/local or
+> deterministic model, no paid API).
 
 The research track (project_overview §5–§6) needs an agent harness to run the A0–A5 retrieval-interface
 ablation. R1's exit is narrow: **one task end-to-end in arms A0/A1/A4, metrics computed from logs.** The
@@ -481,7 +482,7 @@ result is itself publishable (§4.3); the product kill criterion is an **R3** de
 
 **Downstream human gates (NOT in this proposal):** ratify this D22; the **~$1K R3 API spend**; any paid
 API/benchmark access; confirming CodeRAG-Bench + SWE-bench Verified licenses; the R3 model choice.
-Owner: manager (this proposal + spike). On ratification, D22 flips to **Adopted** and R1 begins.
+Owner: manager (proposal + spike) → main session (R1 build). **Ratified 2026-06-13; R1 build underway.**
 
 ---
 

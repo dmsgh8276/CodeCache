@@ -405,6 +405,84 @@ real ContextBench-Lite corpus + the full 5×~15 micro-suite using this scorer; a
 manager (this decision) + performance-bench-engineer (scorer) — recorded in
 `.claude/briefs/BRIEF-M10-benchmarks-release.md`.
 
+### D22 — R1 eval-harness: fork mini-SWE-agent; main session drives; smallest single-task R1  · **PROPOSED — pending human ratification** (plan: research track R1) — *overview §4.2, §5–§7; spike: `.claude/briefs/BRIEF-R1-harness.md`*
+
+> **Held open exactly like D15 was** (spike → human ratify → build). The R1-entry spike is complete;
+> the disposition below is the manager's recommendation and is **NOT yet adopted/ratified**. R1 is not
+> started until a human ratifies. The ~$1K R3 API spend and any paid benchmark/API access remain
+> **separate downstream human gates** — not part of this proposal.
+
+The research track (project_overview §5–§6) needs an agent harness to run the A0–A5 retrieval-interface
+ablation. R1's exit is narrow: **one task end-to-end in arms A0/A1/A4, metrics computed from logs.** The
+spike evaluated stack, arm wiring, logging/scorer reuse, data, ownership, and scope.
+
+**Recommended stack — fork/vendor `mini-SWE-agent` (Python, MIT); do NOT write a from-scratch loop.**
+Decisive reasons, in priority order:
+1. **Bash-only is a *fit*, not a blocker.** mini-SWE-agent is deliberately bash-only (no LLM tool-API,
+   no MCP plugin layer — verified 2026-06-12; the "no MCP" point is a grounded inference from its documented
+   stance). CodeCache **already ships the surfaces an agent calls**: A0 is mini's default (bash→grep/glob/cat),
+   A1/A4 are "the agent runs `codecache query …`" via the M7 CLI on PATH (or the M8 MCP server). The host
+   agent consumes the binary as a black box — which is the experiment's whole point.
+2. **R4 reproducibility/credibility.** A fork of the community-standard minimal SWE agent (MIT, actively
+   maintained — v2.4.1 2026-06-11; the SWE-agent team now positions mini as SWE-agent's successor) is
+   auditable and citable; a bespoke loop is a "did your harness confound the result?" liability for the
+   clean same-agent ablation that *is* the contribution (overview §4.3).
+3. **Effort & logging.** We inherit the ~100-line loop, litellm multi-provider access, and a linear
+   trajectory log; we add only a thin per-turn JSONL sidecar. From-scratch re-derives all of this for no
+   scientific gain.
+
+**Language/runtime boundary (explicit):** the harness is **Python**; the CodeCache core stays **Rust**.
+The boundary is a **process boundary** (shell out to the built `codecache` binary / MCP server), **not**
+FFI/PyO3 — zero async/sync bridge, zero new crate dep, the D12/D15 zero-dependency single-binary identity
+preserved. Research-only, out-of-crate, ships in no release artifact (extends the D17 "test-only, keep
+Cargo.toml lean" precedent to "research-only").
+
+**Arm wiring — already-shipped vs R1-builds.** Reuse: M6 retriever (deterministic BM25, `--max-tokens`),
+M7 `init|index|query` CLI + agent-first ordering (D13), M8 MCP server + 3 tools + self-healing (D14), D3
+enrichment fields already indexed (M4). R1 builds only: the JSONL turn-logger; the A1 tool-doc prompt;
+the A4 one-shot-then-deny wiring; a Python port of the M10.2 scorer protocol. **R1's exit needs only
+A0/A1/A4.** **A2** (D3 toggle) is trivially adjacent and MAY be included if cheap; **A3** (embedding tool —
+needs a model; D1 defers embeddings) and **A5** (hybrid RRF) are **explicitly deferred to R2/R3**.
+
+**Logging + scorer:** log per turn — action (incl. any `codecache query`), prompt+completion tokens
+(cumulative), files/symbols surfaced into context, wall-clock, outcome — the substrate for Layer-1
+(Recall@k/Precision@k/F1 at file+block) and Layer-2 (tokens-to-coverage, tokens-per-task, turns-to-coverage).
+**Reuse the M10.2 scorer PROTOCOL verbatim** (`tests/retrieval_quality.rs` + `micro_suite.json` gold schema:
+`gold_files` + `gold_blocks={file_path,symbol_name}`); the Python scorer re-implements the same five-line
+formulas over the same gold schema — the protocol (pinned by the Rust unit tests) is the contract, honoring
+D21's "R2 swaps in the real corpus, scorer unchanged."
+
+**Data — updates D21's offline finding.** D21 (M10) recorded the real ContextBench corpus as *not vendorable
+offline*. Re-checked at this spike (2026-06-12): **ContextBench (arXiv:2602.05892, `EuniAI/ContextBench`,
+Apache-2.0)** ships **human-annotated gold contexts as static parquet on HuggingFace** and evaluates locally —
+the gold-context DATA appears **offline-downloadable** (generating new agent trajectories still needs an
+agent+LLM = the R3 Layer-2 spend; that distinction stands). **This proposal supersedes the *data* half of D21**
+(the corpus is now vendorable), while **D21's scorer/micro-suite-proxy disposition stays intact.** *Honest
+caveat:* the "offline gold contexts" reading is a grounded inference from the repo docs — confirm against the
+repo README before treating as absolute. **CodeRAG-Bench (RepoEval slice; BM25+dense baselines) and SWE-bench
+Verified are offline-capable but their LICENSES are UNVERIFIED — confirm before vendoring.** RepoEval/RepoCoder
+is MIT-offline; astchunk (cAST) is MIT-offline (R2 chunking baseline). **Smallest R1 task set = ONE task** —
+the in-tree M10.2 micro-suite already provides a gold-labeled task; no corpus acquisition is on R1's exit path
+(corpus expansion is R2).
+
+**Ownership:** **the main session drives R1 directly; do NOT create a new persistent agent now.** The Rust
+specialist agents (clippy/fmt/cargo-test gates) structurally do not fit a Python harness; R1 is thin,
+single-author glue work; the manager stays gatekeeper for scope/DoD/doc-sync. **If R2/R3 grow** (corpus +
+full matrix + ~$1K spend), introduce a dedicated **`research-harness-engineer`** agent (Python gates:
+ruff/pytest) then — a **D22-deferred** item, not an R1 prerequisite.
+
+**Smallest R1 + exit test.** Build: vendor mini (out-of-tree), add JSONL logger, wire A0/A1/A4, port the
+M10.2 scorer, run ONE gold-labeled task. **Exit (R1 done when):** for one task, three trajectory logs
+(A0/A1/A4) + a metrics report computed *from the logs* giving per-arm Layer-1 Recall@k/Precision@k/F1
+(file+block, vs gold) and Layer-2 cumulative tokens + turns-to-coverage; fixed model/temp/prompt across arms;
+reproducible from a clean checkout given an API key. **No outcome claim is made** — which arm wins is R3.
+**Null result / kill criterion (§7):** R1 builds the outcome-agnostic *apparatus* only; a rigorous null
+result is itself publishable (§4.3); the product kill criterion is an **R3** determination, not R1.
+
+**Downstream human gates (NOT in this proposal):** ratify this D22; the **~$1K R3 API spend**; any paid
+API/benchmark access; confirming CodeRAG-Bench + SWE-bench Verified licenses; the R3 model choice.
+Owner: manager (this proposal + spike). On ratification, D22 flips to **Adopted** and R1 begins.
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

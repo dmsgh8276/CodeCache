@@ -49,6 +49,9 @@ cargo clippy --all-targets -- -D warnings
 cargo bench
 ```
 
+**Detailed walkthrough** — running every suite/gate, a full CLI session, the MCP server, and the
+R1 research harness (setup + offline end-to-end run): [`docs/TESTING_AND_USAGE.md`](docs/TESTING_AND_USAGE.md).
+
 ## Claude Code MCP Setup
 
 Wire CodeCache as an MCP server so Claude Code calls it automatically as a tool:

@@ -342,8 +342,30 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
             (`--model-class litellm_textbased`, the mode llama3/phi3 also need) drives every arm reliably.
             Also fixed a measurement bug (grep `./`-prefix split one file into two retrieved entries →
             corrupted Recall@1; +regression test). **R1 exit now met LIVE — no arm-winner claim (that is R3).**
-- [ ] **R2 offline ablations**: Layer-1 sweeps (chunking × ranking × enrichment) on
-      ContextBench-Lite + RepoEval slice; reproduce published BM25 baselines → perf + specialist
+- [ ] **R2 offline ablations** (PROPOSED D23 — pending human ratification; on ratify → research-harness-engineer):
+      chunking × ranking × enrichment, Layer-1 only, zero LLM/agent/paid spend. Exit = reproduce a published
+      BM25 baseline within tolerance on a named slice + pick top configs. Brief:
+      `.claude/briefs/BRIEF-R2-offline-ablations.md`.
+      - [ ] **Ownership/agent:** stand up `.claude/agents/research-harness-engineer.md` (sonnet; scope
+            `research/`; gates ruff + pytest; process-boundary to the binary) + update `.claude/CLAUDE.md`
+            agent table + `research/CLAUDE.md` ownership line. → manager
+      - [ ] **R2.1 (UNGATED) NDCG@10 scorer extension** — add `ndcg_at_k` to `r1harness/scorer.py` +
+            hand-computed `tests/test_scorer.py` cases (binary relevance; ideal-DCG from gold size). → research-harness-engineer
+      - [ ] **R2.2 (UNGATED scaffolding; +crate flag) BM25 weight-sweep** over the retriever via the
+            `codecache_tool.py` process boundary. **Confirmed:** the 7 per-column weights are hardcoded in
+            `src/storage` with no CLI/config surface → varying them needs a small test-first crate flag
+            (`Cargo.toml` untouched). → research-harness-engineer (+ test-lead/eng-lead for the crate flag)
+      - [ ] **R2.3 (UNGATED) chunker-swap seam** with an in-harness stub chunker (proves A/B plumbing before
+            astchunk). Reuses `corpus.py`. → research-harness-engineer
+      - [ ] **R2.4 (UNGATED) ablation-table reporter** — pure deterministic emit of {chunking × weights ×
+            enrichment} results + top-config selection (extends `report.py`'s pattern). → research-harness-engineer
+      - [ ] **R2.5 (GATED: license #1 + network/HF #2) external-corpus loader** — map CodeRAG-Bench RepoEval
+            (or ContextBench-Lite) gold → our `gold_files`/`gold_blocks` schema (scorer unchanged, D21). → research-harness-engineer
+      - [ ] **R2.6 (GATED: astchunk dep #3) cAST baseline chunker** — replace the R2.3 stub with the astchunk
+            PyPI package (MIT, research-only). → research-harness-engineer
+      - [ ] **R2.7 (GATED: R2.5 + named-baseline #4) baseline-reproduction + exit run** — reproduce the
+            published BM25 number within tolerance + run the ~12-cell ablation + promote top configs. Satisfies
+            the R2 exit. → research-harness-engineer + manager (exit verify)
 - [ ] **R3 agent-in-loop study**: full A0–A5 matrix on 30–50 tasks → promote winners to 100;
       budget/scale sweeps; RQ1–RQ3 plots with CIs; ~$1K API line item → manager + perf
 - [ ] **R4 write-up & release**: preprint + artifact (binary, harness, trajectories); blog;

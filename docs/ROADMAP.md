@@ -496,6 +496,62 @@ corrupting Recall@1 (+regression test; pytest 38→39). **No arm-winner claim �
 Live trajectories + reports under `research/r1_harness/runs/` (gitignored); the native-vs-text-based runs
 are preserved locally as `runs/live_run{1,2,3}_*`.
 
+### D23 — R2 offline ablations: reproduce one published BM25 baseline + pick top configs; introduce `research-harness-engineer`  · **PROPOSED — pending human ratification** (plan: research track R2) — *overview §5–§7; spike: `.claude/briefs/BRIEF-R2-offline-ablations.md`*
+
+> **Spike → human ratify → build (the D15/D22 pattern).** The R2-entry spike is complete; the disposition
+> below is PROPOSED and **not yet ratified**. Ungated slices (NDCG@10 scorer, sweep/chunker scaffolding over
+> the in-tree micro-suite) may start on ratification; the corpus/license/astchunk/CLI slices are individually
+> gated (below). The ~$1K R3 API spend and any paid benchmark/API access remain separate downstream R3 gates
+> — **not** authorized here (R2 is zero-spend offline Layer-1 scoring; no agent-in-loop, no LLM).
+
+The research track (overview §5.3) needs the chunking × ranking × enrichment ablation R2 owns. R2's exit is
+narrow and offline: **reproduce a published BM25 baseline within tolerance on a named corpus slice, and select
+the top retrieval config(s)** — no agent, no LLM, no Layer-2.
+
+**Smallest R2 + exit.** Run the CodeCache retriever offline through the R1 harness, scored by the R1 Layer-1
+scorer extended with **NDCG@10** (the CodeRAG-Bench metric R2 adds), over a **~12-cell ablation**:
+{CodeCache AST chunks vs cAST/astchunk} × {~3 per-column BM25 weight settings} × {D3 enrichment ON/OFF}.
+**Exit:** on a named public slice with a published BM25 number, the retriever reproduces it within a stated
+tolerance (proposed: **CodeRAG-Bench RepoEval function-level slice; ± 0.03 absolute** on the headline metric;
+fallback **ContextBench-Lite**, Apache-2.0), AND the ablation table is emitted with a stated top-config
+criterion (proposed: **highest-and-separated beyond the noise floor**; ties reported as ties) naming the
+promoted config(s) — R3's agent-in-loop inputs. Deterministic, reproducible from a clean checkout.
+
+**Reuse vs new.** Reuse the R1 scorer/protocol (Recall/Precision/F1 @k file+block — M10.2 contract, D21), the
+gold schema, `corpus.py`, `codecache_tool.py` (process boundary), `report.py`'s pure-emit pattern. New:
+**NDCG@10**; an **external-corpus loader** mapping published gold → our gold schema (scorer unchanged, D21); a
+**chunker-swap seam** + the **astchunk** baseline; a **per-column BM25 weight-sweep driver**; the
+**baseline-reproduction + ablation runner**.
+
+**Staging — ungated first.** UNGATED (start on ratification; no external data/dep; TDD vs in-tree gold):
+(R2.1) NDCG@10 scorer extension; (R2.2) BM25 weight-sweep scaffolding; (R2.3) chunker-swap seam with a stub
+chunker; (R2.4) ablation-table reporter. GATED (each on a specific human decision): (R2.5) vendor the external
+slice — license + network/HF; (R2.6) the astchunk dep; (R2.7) the baseline-reproduction exit run — depends on
+R2.5 + the chosen published number. If a gate stalls, R2.1–R2.4 still ship the tested apparatus over the
+micro-suite (R2 is not all-or-nothing).
+
+**BM25 weights live in the crate (verified).** The per-column `bm25()` weights are hardcoded in `src/storage`
+(`symbol_name` 10.0, `parent_symbol` 5.0, rest 2.0/1.0; `ORDER BY bm25 ASC, rowid ASC`) with **no CLI/config
+surface** (config exposes only `bm25_k1`/`bm25_b`). So R2.2's weight sweep **requires a small test-first crate
+change** to expose the 7 weights (a CLI flag / config key, `Cargo.toml` untouched) — the one place R2 touches
+the Rust crate, routed through the normal TDD team + manager gate. Flagged so it is not a build-time surprise.
+
+**Cuts (§7, to R3+).** RQ4 (freshness), SWE-ContextBench, SWE-bench Verified, arm A3 (embedding tool — D1
+defers embeddings), arm A5 (hybrid RRF), all Layer-2 token economy + bootstrap CIs + the ~$1K spend, and
+line-level granularity. R2 keeps file+block granularity + adds only NDCG@10.
+
+**Ownership — introduce `research-harness-engineer` now (proposed).** R1 (D22) had the main session drive and
+pre-authorized this agent "if R2/R3 grow"; **R2 is that growth point.** Stand up a dedicated
+**`research-harness-engineer`** (model: sonnet; scope: `research/` only; gates: **ruff + pytest**;
+process-boundary to the binary; honors research/CLAUDE.md — never touches the crate/`Cargo.toml`). The manager
+stays gatekeeper for scope/DoD/doc-sync. (Lighter alternative: defer the agent to R3.)
+
+**Human gates (NOT in this proposal):** ratify this D23; verify the CodeRAG-Bench/RepoEval **license** (fall
+back to ContextBench-Lite Apache-2.0 if unclear); authorize the **research-harness network/HF download** of
+benchmark data (separate from the product's air-gapped guarantee); approve the **astchunk** research dep;
+confirm the **scope cuts + the named published baseline/tolerance**. The **~$1K R3 spend** and any paid access
+stay R3 gates. Owner: manager (proposal + spike) → research-harness-engineer (R2 build, on ratification).
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

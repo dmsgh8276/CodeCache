@@ -342,13 +342,14 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
             (`--model-class litellm_textbased`, the mode llama3/phi3 also need) drives every arm reliably.
             Also fixed a measurement bug (grep `./`-prefix split one file into two retrieved entries →
             corrupted Recall@1; +regression test). **R1 exit now met LIVE — no arm-winner claim (that is R3).**
-- [ ] **R2 offline ablations** (PROPOSED D23 — pending human ratification; on ratify → research-harness-engineer):
+- [~] **R2 offline ablations** (D23 adopted 2026-06-14; owner: research-harness-engineer; ungated R2.1–R2.4
+      first, external-corpus gates R2.5–R2.7 deferred):
       chunking × ranking × enrichment, Layer-1 only, zero LLM/agent/paid spend. Exit = reproduce a published
       BM25 baseline within tolerance on a named slice + pick top configs. Brief:
       `.claude/briefs/BRIEF-R2-offline-ablations.md`.
-      - [ ] **Ownership/agent:** stand up `.claude/agents/research-harness-engineer.md` (sonnet; scope
-            `research/`; gates ruff + pytest; process-boundary to the binary) + update `.claude/CLAUDE.md`
-            agent table + `research/CLAUDE.md` ownership line. → manager
+      - [x] **Ownership/agent:** `.claude/agents/research-harness-engineer.md` created (sonnet; scope
+            `research/`; gates ruff + pytest; process-boundary to the binary); `.claude/CLAUDE.md` agent
+            table + `research/CLAUDE.md` ownership line + `docs/ENGINEERING_PLAN.md` §5 updated.
       - [ ] **R2.1 (UNGATED) NDCG@10 scorer extension** — add `ndcg_at_k` to `r1harness/scorer.py` +
             hand-computed `tests/test_scorer.py` cases (binary relevance; ideal-DCG from gold size). → research-harness-engineer
       - [ ] **R2.2 (UNGATED scaffolding; +crate flag) BM25 weight-sweep** over the retriever via the

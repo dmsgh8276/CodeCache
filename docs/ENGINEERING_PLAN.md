@@ -102,6 +102,12 @@ red is left behind; CI (`devops-release-engineer`) mirrors them exactly:
 
 Hooks no-op cleanly before `Cargo.toml` exists, and honor `stop_hook_active` to avoid loops.
 
+**Research track (out-of-crate).** `research/` is Python, not Rust — the four cargo gates above do not
+apply there. Its gates are **`ruff` + `pytest`**, run by the `research-harness-engineer` (ROADMAP **D23**)
+as part of its tests-first workflow (no hook wires them — they are run in the agent's loop, against the
+short-path venv). The research tree ships in no release artifact and touches no `Cargo.toml`
+(see `research/CLAUDE.md`).
+
 **Toolchain (local == CI).** The pinned channel in `rust-toolchain.toml` is the **single source
 of truth** — currently **1.85.0** (our MSRV; mirrored by `Cargo.toml` `rust-version = "1.85"`).
 CI honors that file, so gates run on the same compiler locally and in CI. Bump the channel only

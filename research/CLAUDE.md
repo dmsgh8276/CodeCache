@@ -1,7 +1,9 @@
 # research/ — CLAUDE.md
 
-Research track (R1–R4) artifacts. **Owner:** main session for R1 (ROADMAP **D22**); a dedicated
-`research-harness-engineer` agent is introduced only if R2/R3 grow (D22-deferred).
+Research track (R1–R4) artifacts. **Owner:** `research-harness-engineer` agent for **R2+** (ROADMAP
+**D23**, adopted 2026-06-14 — sonnet; scope `research/`; gates **ruff + pytest**; process-boundary to the
+binary). The main session drove **R1** (D22). The `principal-engineering-manager` stays gatekeeper
+(scope/DoD/doc-sync) and the `code-reviewer` is the independent APPROVE/BLOCK gate.
 
 ## What lives here
 - `r1_harness/` — the R1 eval harness: a fork of mini-SWE-agent (Python) that runs the

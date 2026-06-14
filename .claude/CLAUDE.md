@@ -23,6 +23,7 @@ How the CodeCache agent team, skills, and hooks fit together. **Owner:** `princi
 | performance-bench-engineer | sonnet | Criterion benches + perf budgets. |
 | rust-treesitter-specialist | opus | Tree-sitter grammars/queries + FTS5 tuning. |
 | devops-release-engineer | sonnet | CI parity + releases. |
+| research-harness-engineer | sonnet | Python research harness (`research/`, R2+); ruff + pytest; process-boundary to the binary. |
 
 **Delegation:** start non-trivial work with the manager; it writes a brief and routes to the
 test lead → engineering lead → (specialist/perf) → reviewer → back to manager.

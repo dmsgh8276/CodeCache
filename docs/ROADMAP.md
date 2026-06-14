@@ -496,13 +496,15 @@ corrupting Recall@1 (+regression test; pytest 38→39). **No arm-winner claim �
 Live trajectories + reports under `research/r1_harness/runs/` (gitignored); the native-vs-text-based runs
 are preserved locally as `runs/live_run{1,2,3}_*`.
 
-### D23 — R2 offline ablations: reproduce one published BM25 baseline + pick top configs; introduce `research-harness-engineer`  · **PROPOSED — pending human ratification** (plan: research track R2) — *overview §5–§7; spike: `.claude/briefs/BRIEF-R2-offline-ablations.md`*
+### D23 — R2 offline ablations: reproduce one published BM25 baseline + pick top configs; introduce `research-harness-engineer`  · **Adopted 2026-06-14 (human-ratified)** (plan: research track R2) — *overview §5–§7; spike: `.claude/briefs/BRIEF-R2-offline-ablations.md`*
 
-> **Spike → human ratify → build (the D15/D22 pattern).** The R2-entry spike is complete; the disposition
-> below is PROPOSED and **not yet ratified**. Ungated slices (NDCG@10 scorer, sweep/chunker scaffolding over
-> the in-tree micro-suite) may start on ratification; the corpus/license/astchunk/CLI slices are individually
-> gated (below). The ~$1K R3 API spend and any paid benchmark/API access remain separate downstream R3 gates
-> — **not** authorized here (R2 is zero-spend offline Layer-1 scoring; no agent-in-loop, no LLM).
+> **Spike → human ratify → build (the D15/D22 pattern), now ratified.** The R2-entry spike is complete and
+> the disposition below was **ratified by the human on 2026-06-14** with two choices: (a) **ungated apparatus
+> first** — build R2.1–R2.4 (NDCG@10 scorer, BM25 weight-sweep + the small crate flag, chunker seam, ablation
+> reporter) over the in-tree micro-suite, and decide the external-corpus gates (license/network/astchunk —
+> R2.5–R2.7) afterward; (b) **introduce the `research-harness-engineer` agent** to own the R2–R4 build. The
+> ~$1K R3 API spend and any paid benchmark/API access remain separate downstream R3 gates — **not** authorized
+> here (R2 is zero-spend offline Layer-1 scoring; no agent-in-loop, no LLM).
 
 The research track (overview §5.3) needs the chunking × ranking × enrichment ablation R2 owns. R2's exit is
 narrow and offline: **reproduce a published BM25 baseline within tolerance on a named corpus slice, and select

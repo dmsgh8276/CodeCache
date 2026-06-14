@@ -8,7 +8,14 @@ Rust source of truth. Each expected value is hand-derived, not regenerated.
 import math
 
 from r1harness import scorer
-from r1harness.scorer import f1_at_k, macro_average, precision_at_k, recall_at_k, score_query
+from r1harness.scorer import (
+    f1_at_k,
+    macro_average,
+    ndcg_at_k,
+    precision_at_k,
+    recall_at_k,
+    score_query,
+)
 
 CLOSE = 1e-10
 
@@ -83,6 +90,52 @@ def test_f1_known_hand_computed():
     assert abs(expected - 0.8) < CLOSE
 
 
+# ── ndcg_at_k ────────────────────────────────────────────────────────────────
+# DCG@k = Σ_{i=1..k} rel_i / log2(i+1) (binary rel, 1-based rank); IDCG@k = ideal
+# (all |gold| relevant first); NDCG@k = DCG/IDCG. Empty gold ⇒ 1.0 (matches recall).
+
+
+def test_ndcg_k1_perfect_hit():
+    assert ndcg_at_k(["a", "b", "c"], {"a"}, 1) == 1.0
+
+
+def test_ndcg_gold_at_rank2():
+    # DCG = 1/log2(3); IDCG = 1/log2(2) = 1 → NDCG = 1/log2(3)
+    expected = 1.0 / math.log2(3)
+    assert abs(ndcg_at_k(["b", "a", "c"], {"a"}, 10) - expected) < CLOSE
+
+
+def test_ndcg_two_gold_interleaved():
+    # retrieved [a, x, b], gold {a, b}: DCG = 1/log2(2) + 1/log2(4); IDCG = 1/log2(2) + 1/log2(3)
+    dcg = 1.0 / math.log2(2) + 1.0 / math.log2(4)
+    idcg = 1.0 / math.log2(2) + 1.0 / math.log2(3)
+    assert abs(ndcg_at_k(["a", "x", "b"], {"a", "b"}, 10) - dcg / idcg) < CLOSE
+
+
+def test_ndcg_perfect_when_gold_ranked_first():
+    # both gold at ranks 1,2 → DCG == IDCG → NDCG = 1.0
+    assert abs(ndcg_at_k(["a", "b", "c"], {"a", "b"}, 10) - 1.0) < CLOSE
+
+
+def test_ndcg_empty_gold_is_one():
+    assert ndcg_at_k(["a", "b"], set(), 5) == 1.0
+
+
+def test_ndcg_empty_retrieved_is_zero():
+    assert ndcg_at_k([], {"a"}, 5) == 0.0
+
+
+def test_ndcg_gold_beyond_k_is_zero():
+    # 'a' is at rank 6; at k=5 it is outside the top-k → NDCG = 0.0
+    assert ndcg_at_k(["b", "c", "d", "e", "f", "a"], {"a"}, 5) == 0.0
+
+
+def test_ndcg_gold_at_rank6_within_k10():
+    # 'a' at rank 6 → DCG = 1/log2(7); IDCG = 1 → NDCG = 1/log2(7)
+    expected = 1.0 / math.log2(7)
+    assert abs(ndcg_at_k(["b", "c", "d", "e", "f", "a"], {"a"}, 10) - expected) < CLOSE
+
+
 # ── dedup_first ──────────────────────────────────────────────────────────────
 
 
@@ -122,3 +175,19 @@ def test_macro_average_empty_is_zero():
     avg = macro_average([], k_values=[1, 5, 10])
     assert avg[10].recall_file == 0.0
     assert avg[10].f1_block == 0.0
+
+
+def test_score_query_carries_ndcg():
+    metrics = score_query(["a", "b"], [("a", "f")], {"a"}, {("a", "f")}, k_values=[1, 10])
+    at1 = next(m for m in metrics if m.k == 1)
+    # gold file + block both at rank 1 → NDCG@1 = 1.0 at both granularities
+    assert at1.ndcg_file == 1.0
+    assert at1.ndcg_block == 1.0
+
+
+def test_macro_average_includes_ndcg():
+    # Query 1: ndcg_file@1 = 1.0 (gold at rank 1); Query 2: ndcg_file@1 = 0.0 (miss) → mean 0.5
+    q1 = score_query(["a"], [("a", "f")], {"a"}, {("a", "f")}, k_values=[1])
+    q2 = score_query(["b"], [("b", "g")], {"a"}, {("a", "f")}, k_values=[1])
+    avg = macro_average([q1, q2], k_values=[1])
+    assert math.isclose(avg[1].ndcg_file, 0.5)

@@ -8,6 +8,10 @@ This re-implements, *verbatim in semantics*, the scoring protocol pinned by
 - **Precision@k** = |G ∩ R_k| / min(k, |R|)  (short lists not penalised; 0 if |R|=0)
 - **F1@k**        = 2·P·R / (P + R)          (0.0 when P + R = 0)
 
+**NDCG@k** = DCG@k / IDCG@k (binary relevance; empty gold ⇒ 1.0) is an **R2 extension**
+(the CodeRAG-Bench Layer-1 metric, ROADMAP D23) layered on top of the M10.2 port — it is
+**not** part of ``retrieval_quality.rs``; the recall/precision/f1 above remain the verbatim port.
+
 scored at two granularities:
 
 - **file**  — items are ``file_path`` strings; gold is ``gold_files``.
@@ -23,6 +27,7 @@ in the real corpus, scorer unchanged").
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Hashable, Iterable, Sequence
 
@@ -65,17 +70,49 @@ def f1_at_k(retrieved: Sequence[Hashable], gold: set[Hashable], k: int) -> float
     return 2.0 * p * r / (p + r)
 
 
+def dcg_at_k(retrieved: Sequence[Hashable], gold: set[Hashable], k: int) -> float:
+    """Discounted cumulative gain over the top-k, **binary** relevance.
+
+    ``DCG@k = Σ_{i=1..k} rel_i / log2(i + 1)`` with ``rel_i = 1`` when the rank-``i``
+    (1-based) retrieved item is gold, else 0. Order-sensitive (unlike set recall).
+    """
+    top_k = retrieved[: min(len(retrieved), k)]
+    return sum(1.0 / math.log2(rank + 2) for rank, item in enumerate(top_k) if item in gold)
+
+
+def ndcg_at_k(retrieved: Sequence[Hashable], gold: set[Hashable], k: int) -> float:
+    """Normalised DCG@k = ``DCG@k / IDCG@k`` (CodeRAG-Bench Layer-1 metric, R2/D23).
+
+    Binary relevance (today's gold schema is binary — graded relevance is a later
+    refinement). The ideal ranking puts all ``|gold|`` relevant items first, so
+    ``IDCG@k = Σ_{i=1..min(k, |gold|)} 1 / log2(i + 1)``. Conventions match the other
+    metrics: empty gold ⇒ 1.0 (nothing to rank); non-empty gold with no top-k hit ⇒ 0.0.
+
+    Note: NDCG is an R2 **extension** beyond the M10.2 protocol the rest of this module
+    ports — the Rust scorer (``retrieval_quality.rs``) does not compute it.
+    """
+    if not gold:
+        return 1.0
+    ideal_hits = min(len(gold), k)
+    idcg = sum(1.0 / math.log2(rank + 2) for rank in range(ideal_hits))
+    if idcg == 0.0:
+        return 0.0
+    return dcg_at_k(retrieved, gold, k) / idcg
+
+
 @dataclass(frozen=True)
 class MetricAtK:
-    """The six Layer-1 metrics for one query at one k value."""
+    """The Layer-1 metrics for one query at one k value (file + block granularity)."""
 
     k: int
     recall_file: float
     precision_file: float
     f1_file: float
+    ndcg_file: float
     recall_block: float
     precision_block: float
     f1_block: float
+    ndcg_block: float
 
 
 def score_query(
@@ -99,9 +136,11 @@ def score_query(
                 recall_file=recall_at_k(retrieved_files, gold_files, k),
                 precision_file=precision_at_k(retrieved_files, gold_files, k),
                 f1_file=f1_at_k(retrieved_files, gold_files, k),
+                ndcg_file=ndcg_at_k(retrieved_files, gold_files, k),
                 recall_block=recall_at_k(retrieved_blocks, gold_blocks, k),
                 precision_block=precision_at_k(retrieved_blocks, gold_blocks, k),
                 f1_block=f1_at_k(retrieved_blocks, gold_blocks, k),
+                ndcg_block=ndcg_at_k(retrieved_blocks, gold_blocks, k),
             )
         )
     return out
@@ -132,16 +171,18 @@ def macro_average(per_query: Sequence[list[MetricAtK]], k_values: Iterable[int] 
     n = len(per_query)
     for k in k_values:
         if n == 0:
-            result[k] = MetricAtK(k, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            result[k] = MetricAtK(k, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             continue
-        rf = pf = ff = rb = pb = fb = 0.0
+        rf = pf = ff = nf = rb = pb = fb = nb = 0.0
         for metrics in per_query:
             m = next(mk for mk in metrics if mk.k == k)
             rf += m.recall_file
             pf += m.precision_file
             ff += m.f1_file
+            nf += m.ndcg_file
             rb += m.recall_block
             pb += m.precision_block
             fb += m.f1_block
-        result[k] = MetricAtK(k, rf / n, pf / n, ff / n, rb / n, pb / n, fb / n)
+            nb += m.ndcg_block
+        result[k] = MetricAtK(k, rf / n, pf / n, ff / n, nf / n, rb / n, pb / n, fb / n, nb / n)
     return result

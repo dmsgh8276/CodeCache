@@ -350,8 +350,11 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
       - [x] **Ownership/agent:** `.claude/agents/research-harness-engineer.md` created (sonnet; scope
             `research/`; gates ruff + pytest; process-boundary to the binary); `.claude/CLAUDE.md` agent
             table + `research/CLAUDE.md` ownership line + `docs/ENGINEERING_PLAN.md` §5 updated.
-      - [ ] **R2.1 (UNGATED) NDCG@10 scorer extension** — add `ndcg_at_k` to `r1harness/scorer.py` +
-            hand-computed `tests/test_scorer.py` cases (binary relevance; ideal-DCG from gold size). → research-harness-engineer
+      - [x] **R2.1 (UNGATED) NDCG@10 scorer extension** — `dcg_at_k`/`ndcg_at_k` added to `r1harness/scorer.py`
+            (binary relevance; empty gold ⇒ 1.0; ideal-DCG from gold size; an R2 extension beyond the M10.2
+            port) + `ndcg_file`/`ndcg_block` in `MetricAtK`/`score_query`/`macro_average`; 10 hand-computed
+            `tests/test_scorer.py` cases. **49 pytest + ruff green; code-reviewer APPROVED** the slice. (ruff
+            gate baseline for the research tree stood up in the same effort, commit `9b42702`.)
       - [ ] **R2.2 (UNGATED scaffolding; +crate flag) BM25 weight-sweep** over the retriever via the
             `codecache_tool.py` process boundary. **Confirmed:** the 7 per-column weights are hardcoded in
             `src/storage` with no CLI/config surface → varying them needs a small test-first crate flag

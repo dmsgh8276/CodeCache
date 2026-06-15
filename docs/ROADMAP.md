@@ -579,6 +579,55 @@ manager (this decision + the §3.2.2/§3.2.3/§7.2 amendment) → test-lead (RED
 rust-treesitter-specialist (FTS5 bind-vs-format) → code-reviewer (APPROVE, 0 findings). 208 tests
 green; all four gates clean (Rust 1.85). Brief: `.claude/briefs/BRIEF-R2.2a-bm25-weights-flag.md`.
 
+### D25 — CLI-reachable chunk-ingestion seam (`codecache ingest <CHUNKS_JSON>` / `app::ingest_chunks`)  · **Adopted 2026-06-14 (human-ratified, spike→decision)** (plan: research track R2.3a) — *spec: §3.2.4, §3.2.2, §7.1/§7.2*
+
+> **Spike → human ratify → build (the D15/D22/D23 pattern), now ratified.** The R2.3-entry spike (main
+> session) is complete and this disposition was **ratified by the human on 2026-06-14**. Zero-spend, offline,
+> additive; `Cargo.toml` untouched. This is the **single crate touch** for R2.3 (flagged in D23); the
+> harness-side stub chunker + A/B plumbing is the pure-`research/` follow-on **R2.3b**.
+
+R2's chunker ablation (D23) must vary the chunker while holding storage + ranking + enrichment constant.
+**Spike findings:** the chunker is an index-time **hardcoded free fn** (`chunker::chunk(tree, source,
+lang)`) — not a trait, not swappable — and the research harness is **process-boundary-only** (shells to the
+built binary; no FFI/PyO3). So the only way to ablate the chunker is a **CLI-reachable ingestion path** that
+inserts **caller-supplied, pre-chunked** records directly, bypassing discover→parse→chunk, so any external
+chunker's output (an in-harness stub at R2.3b; astchunk/cAST at the gated R2.6) flows through CodeCache's
+**same** `Storage` + FTS5-BM25 + `Retriever`. `Storage::insert_chunks(&[Chunk])` already exists
+(single-transaction batch); the seam reuses it.
+
+**Decision (surface, plan-amended before code):**
+- A new **hidden** `codecache ingest <CHUNKS_JSON>` subcommand (clap `hide = true`; research-only, not in
+  `--help`) — **not** an `index --from-chunks` mode (`index` = discover/parse/chunk, a mature tested
+  contract; overloading it muddies a clean command and risks regression). `--db-path` like the others.
+- An `app::ingest_chunks(project_root, chunks_json) -> Result<IngestStats, AppError>` facade beside
+  `index`/`init` (`cli/ingest.rs` is the thin handler).
+- A **format-local input DTO** (in the ingesting module) deserializing a JSON **array of chunk records** →
+  `types::Chunk`. **serde stays OFF `types::Chunk`** (D4/D5 transport separation — mirrors
+  `formatter::json::JsonChunk`). Required fields: `symbol_name, symbol_type, file_path, start_byte,
+  end_byte, start_line, end_line, chunk_text, language`; optional+defaulted: `parent_symbol` (null),
+  `file_docstring` (null), `imports` (`[]`), `cross_references` (`[]`), `is_heuristic` (false). Enum strings
+  via the existing total, no-panic `SymbolType::from_str_lenient` / `Language::from_str_lenient`. The DTO is
+  **fuller** than the §6.4.2 query-output JSON (which is lossy — omits line range + enrichment) because
+  R2.3b holds **enrichment constant** to isolate chunking. Full schema in §7.2.
+
+**Behavior + invariants.** Insert in **JSON-array order** (rowid order ⇒ deterministic `bm25 ASC, rowid
+ASC` tie-break). Write one `files_metadata` row per **distinct** `file_path` (so `status` and the D19
+`codecache_outline` work on an ingested DB — hash is a deterministic sentinel since a fresh DB per arm makes
+the real content hash irrelevant), then restamp `total_files`/`total_chunks`. **Re-ingest / incremental /
+idempotency is OUT of scope** — the harness `init`s a fresh DB per arm. `is_heuristic` is passed in-memory
+but the schema still has no column (the deferred M5/M7 seam), so a round-trip reconstructs `false`. Empty
+input (`[]`) is a valid no-op (exit 0). Malformed JSON / missing required / unknown enum / wrong type →
+typed `AppError` → clean **nonzero exit**, no reachable `unwrap/expect/panic` (the R2.2a/D24 validation
+pattern).
+
+**Constraints.** Additive only (`index`/`query`/`update`/`status`/`config`/`serve` + all existing tests
+stay green). **`Cargo.toml` UNTOUCHED** — serde + serde_json are already deps. **No new `Storage` method**
+(reuses `insert_chunks` / `update_file_hash` / `set_index_state`; totals computed from the ingested data or
+recomputed via `all_indexed_files`+`get_file_meta`). Owner: manager (this decision + the §3.2.4/§3.2.2/§7
+amendment) → test-lead (RED) → eng-lead (GREEN) → code-reviewer (APPROVE). The Rust crate change is
+gatekept by the normal TDD team; **research-harness-engineer does NOT touch the crate** (R2.3b is its pure
+`research/` follow-on). Brief: `.claude/briefs/BRIEF-R2.3a-chunk-ingestion-seam.md`.
+
 ---
 
 ## Deferred to v0.2+ (from project_plan §9.2)

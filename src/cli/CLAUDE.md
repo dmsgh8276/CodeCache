@@ -79,3 +79,11 @@ clean unsupported error (D4 seam); reviewer APPROVED; all four gates green.
 R2.2a / D24 GREEN (2026-06-14): `query --bm25-weights <W>` added (clap arg + `dispatch` thread +
 `parse_bm25_weights` helper in `query.rs`). +3 cli_tests (help lists flag / valid vector runs /
 malformed → nonzero no-panic) + 4 parser unit tests; cli_tests 14/14, lib unit 33; all four gates clean.
+R2.3a / D25 GREEN (2026-06-14): hidden `ingest <CHUNKS_JSON>` subcommand added (`#[command(hide = true)]`
+— 8th command, reachable but NOT in `--help`; `mod ingest` + `cli/ingest.rs` thin handler →
+`crate::ingest_chunks`). Inserts caller-supplied pre-chunked records straight into storage (the research
+chunker-ablation seam, bypassing discover→parse→chunk); the format-local input DTO + `ingest_chunks`
+facade live in `app.rs` (serde off `types::Chunk`, D4/D5; reuses `insert_chunks`/`update_file_hash`/
+`set_index_state` — no new `Storage` method). +3 cli_tests (hidden-but-reachable `ingest --help` /
+hidden-from-top-level-help / required `<CHUNKS_JSON>` positional). E2E in `tests/e2e_ingest.rs` (10) + lib
+surface in `tests/e2e_ingest_lib.rs` (3). cli_tests 17/17; **224 tests total**; all four gates clean.

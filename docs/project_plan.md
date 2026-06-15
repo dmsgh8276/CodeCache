@@ -535,6 +535,31 @@ pub struct IndexStats {
 }
 ```
 
+##### Chunk ingestion seam (Decision Log **D25**, research track R2.3a)
+
+A CLI-reachable path that inserts **caller-supplied, pre-chunked** records straight into storage,
+bypassing discover→parse→chunk. It exists so the R2 research harness can ablate the chunker over the
+**same** storage + FTS5-BM25 + retriever (the chunker is an index-time hardcoded free fn — `chunker::chunk`
+— not a swappable trait; the harness is process-boundary-only). The seam lives on the `app` facade beside
+`index`/`init`, with a **format-local input DTO** (serde stays off `types::Chunk` — D4/D5):
+
+```rust
+// app.rs (facade), driven by the hidden `codecache ingest <CHUNKS_JSON>` command (§7.2).
+pub fn ingest_chunks(project_root: &Path, chunks_json: &Path) -> Result<IngestStats, AppError>;
+
+pub struct IngestStats { pub files_ingested: usize, pub chunks_ingested: usize }
+```
+
+Behavior: open `Storage` at the resolved `db_path` → deserialize the JSON **array of chunk records** (a
+format-local DTO → `types::Chunk`, enum strings via `from_str_lenient`, optional enrichment fields default
+to `null`/`[]`/`false`) → `Storage::insert_chunks` **in JSON-array order** (so the `bm25 ASC, rowid ASC`
+tie-break is deterministic) → write one `files_metadata` row per distinct `file_path` (so `status`/
+`codecache_outline` work) → restamp `index_state` `total_files`/`total_chunks`. Malformed JSON / missing
+required field / unknown enum / wrong type → typed [`AppError`] → nonzero exit (no panic). Re-ingest /
+incremental is **out of scope** (the harness inits a fresh DB per arm). The full input schema is the
+`ingest` command spec in §7.2. Reuses the existing `insert_chunks` / `update_file_hash` / `set_index_state`
+storage APIs — **no new `Storage` method, no new dependency** (serde/serde_json already in the tree).
+
 ***
 
 ## 4. Data Models and Storage
@@ -1072,6 +1097,7 @@ COMMANDS:
     status      Show index statistics and health
     config      Manage configuration
     serve       Start an MCP server (for Claude Code integration)
+    # (hidden) ingest  Insert pre-chunked records from JSON, bypassing parse/chunk — research-only (D25)
 
 OPTIONS:
     -h, --help       Print help
@@ -1175,6 +1201,60 @@ EXAMPLES:
     # Update from git (modified files)
     git diff --name-only | xargs codecache update
 ```
+
+#### `codecache ingest` (hidden — research-only, Decision Log D25)
+
+Insert **caller-supplied, pre-chunked** records straight into the index from a JSON file, **bypassing**
+file discovery, parsing, and chunking. This is a research seam (clap `hide = true`; not shown in `--help`)
+for the R2 chunker ablation: it lets an external chunker's output flow through CodeCache's same storage +
+FTS5-BM25 + retriever so the chunker is the only variable. Not part of the normal user workflow — use
+`init`/`index` for real indexing.
+
+```bash
+codecache ingest <CHUNKS_JSON> [OPTIONS]
+
+ARGUMENTS:
+    <CHUNKS_JSON>    Path to a JSON file: an array of chunk records (schema below)
+
+OPTIONS:
+    --db-path <PATH>    Database location [default: .codecache/index.db]
+```
+
+**Input schema** — top-level is a JSON **array**; array order is insertion (rowid) order, so a fixed input
+yields a deterministic `bm25 ASC, rowid ASC` ranking. Each record (a *fuller* shape than the lossy
+query-output JSON of §6.4.2 — it carries every field the harness controls, enrichment included, so R2.3b
+can hold enrichment constant):
+
+```jsonc
+[
+  {
+    // required
+    "symbol_name": "authenticate_user",
+    "symbol_type": "function",        // function | class | method | struct
+    "file_path":   "src/auth/handlers.py",
+    "start_byte":  1234,
+    "end_byte":    1789,
+    "start_line":  45,                // 1-based inclusive (D7)
+    "end_line":    67,
+    "chunk_text":  "def authenticate_user(): ...",
+    "language":    "python",          // python | typescript | go
+    // optional (defaults shown)
+    "parent_symbol":    null,         // string | null
+    "file_docstring":   null,         // string | null
+    "imports":          [],           // string[]
+    "cross_references": [],           // string[]
+    "is_heuristic":     false         // bool (passed in-memory; storage has no column yet — dropped)
+  }
+]
+```
+
+Required fields missing, an unknown `symbol_type`/`language` string, a wrong JSON type, or malformed JSON
+all surface a typed error → **nonzero exit**, never a panic. Empty input (`[]`) is a valid no-op (0 files,
+0 chunks, exit 0). After insertion, one `files_metadata` row is written per distinct `file_path` (so
+`status` and `codecache_outline` see the data) and `index_state` `total_files`/`total_chunks` are
+restamped. **Re-ingest / incremental update is out of scope** — the harness `init`s a fresh DB per arm.
+Implemented by `app::ingest_chunks` (§3.2.4) over the existing `Storage::insert_chunks`; serde/serde_json
+are already in the tree, so this adds **no dependency**.
 
 #### `codecache query`
 

@@ -35,8 +35,9 @@ pub mod parser;
 pub mod retriever;
 pub mod storage;
 
-// ── Public application facade (slice M5.4) ──────────────────────────────────
-// The thin `init` → `index` library entry points + their error, re-exported at the crate root so
-// callers use `codecache::{init, index, AppError, IndexStats}` rather than reaching into modules.
-pub use app::{index, init, AppError};
+// ── Public application facade (slice M5.4; + R2.3a ingest seam) ──────────────
+// The thin `init` → `index` (+ `ingest_chunks`) library entry points + their error, re-exported at
+// the crate root so callers use `codecache::{init, index, ingest_chunks, AppError, IngestStats,
+// IndexStats}` rather than reaching into modules.
+pub use app::{index, ingest_chunks, init, AppError, IngestStats};
 pub use indexer::IndexStats;

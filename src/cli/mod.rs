@@ -13,6 +13,7 @@
 
 mod config;
 mod index;
+mod ingest;
 mod init;
 mod paths;
 mod query;
@@ -40,7 +41,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The seven documented subcommands (§7.1).
+/// The seven documented subcommands (§7.1), plus the hidden `ingest` research seam (D25).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Initialize a new CodeCache index in the current directory.
@@ -145,6 +146,21 @@ pub enum Command {
         #[arg(long, default_value = DEFAULT_DB_PATH)]
         db_path: PathBuf,
     },
+
+    /// Ingest pre-made chunks from a JSON file directly into the index (research seam, D25).
+    ///
+    /// Hidden (`hide = true`): reachable but not advertised in `--help`. Bypasses
+    /// discover→parse→chunk so the R2 chunker ablation can feed any chunker's output through the
+    /// same storage + BM25 + retriever. Delegates to [`crate::ingest_chunks`] (`project_plan.md` §7.2).
+    #[command(hide = true)]
+    Ingest {
+        /// Path to a JSON array of chunk records to insert directly into the index.
+        #[arg(value_name = "CHUNKS_JSON")]
+        chunks_json: PathBuf,
+        /// Database location.
+        #[arg(long, default_value = DEFAULT_DB_PATH)]
+        db_path: PathBuf,
+    },
 }
 
 /// CLI-local `--format` value set (`toon|json|text`, §7.2). Kept distinct from
@@ -222,6 +238,7 @@ fn dispatch(cli: Cli) -> Result<()> {
             port: _,
             db_path,
         } => serve::run(transport, &db_path),
+        Command::Ingest { chunks_json, .. } => ingest::run(&chunks_json),
     }
 }
 

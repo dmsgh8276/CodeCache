@@ -383,8 +383,16 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
               cross-reference, not name (verified — `authenticate_user` falls rank 2→4 on the session-token
               query). Recall@10 saturates (top-10 ≈ whole ≤9-chunk corpus) ⇒ the micro-suite can't separate
               reasonable weightings — the empirical case for the gated real corpus (R2.5–R2.7). → R2.4 emits the formal table.
-      - [ ] **R2.3 (UNGATED) chunker-swap seam** with an in-harness stub chunker (proves A/B plumbing before
-            astchunk). Reuses `corpus.py`. → research-harness-engineer
+      - [~] **R2.3 (UNGATED) chunker-swap seam** — sliced **R2.3a (crate ingestion seam, DONE)** + **R2.3b
+            (harness stub chunker + A/B plumbing, NEXT)**. **R2.3a DONE 2026-06-14 — code-reviewer APPROVED**
+            (independently re-ran gates; 0 blockers) (D25 adopted; spec amended §3.2.4/§7 BEFORE code): hidden
+            `codecache ingest <CHUNKS_JSON>` + `app::ingest_chunks` + format-local DTO→`Chunk` (serde off
+            `types::Chunk`, D4/D5) → `insert_chunks` in array order + `files_metadata` rows + restamp totals;
+            `Cargo.toml` untouched, additive, no-panic validation → nonzero exit. +16 tests (10 e2e_ingest /
+            3 e2e_ingest_lib / 3 cli) = **224 total**; fmt + clippy(-D warnings) + test clean. (Implemented in
+            the main session: the orchestrating manager subagent hit a session limit mid-GREEN; RED state was
+            clean.) → R2.3b (pure `research/`, reuses `corpus.py`) → research-harness-engineer. Brief:
+            `.claude/briefs/BRIEF-R2.3a-chunk-ingestion-seam.md`.
       - [ ] **R2.4 (UNGATED) ablation-table reporter** — pure deterministic emit of {chunking × weights ×
             enrichment} results + top-config selection (extends `report.py`'s pattern). → research-harness-engineer
       - [ ] **R2.5 (GATED: license #1 + network/HF #2) external-corpus loader** — map CodeRAG-Bench RepoEval

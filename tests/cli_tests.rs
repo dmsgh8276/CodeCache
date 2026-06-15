@@ -534,3 +534,61 @@ fn query_bm25_weights_malformed_exits_nonzero_without_panic() {
         let _ = label; // documents the case in source; the loop body asserts the contract.
     }
 }
+
+// ===========================================================================
+// R2.3a — D25: `ingest <CHUNKS_JSON> [--db-path <PATH>]` — CLI PARSING layer (RED).
+//
+// The 8th subcommand is a research-only chunk-ingestion seam (§7.2). It is clap
+// `hide = true` — NOT advertised in the top-level `codecache --help` listing —
+// but FULLY REACHABLE: `codecache ingest --help` parses + exits 0, and running it
+// against a real JSON file works (the end-to-end behavior is covered in
+// `tests/e2e_ingest.rs`; this file pins only the parsing-layer contract).
+//
+// RED rationale: there is no `ingest` subcommand yet, so:
+//   * `ingest_subcommand_is_hidden_from_top_level_help` is GREEN-on-arrival today
+//     (ingest is simply absent) but becomes the LOCK-IN that `hide = true` keeps it
+//     out of `--help` once the command exists — paired with the reachability test
+//     below it is the full "hidden but reachable" contract;
+//   * `ingest_help_is_reachable` FAILS now (clap errors on `ingest --help` as an
+//     unknown subcommand → nonzero, not the `.success()` asserted) — the right
+//     reason: the command is not implemented;
+//   * `ingest_requires_chunks_json_positional` FAILS now because there is no
+//     `ingest` subcommand to enforce the required positional. Once it exists, a
+//     bare `ingest` (no path) must be a clap required-arg error → nonzero, no panic.
+// ===========================================================================
+
+#[test]
+fn ingest_subcommand_is_hidden_from_top_level_help() {
+    // `hide = true`: the top-level help must NOT advertise `ingest` (research-only surface).
+    // The seven documented subcommands stay listed (sanity that help still renders them).
+    let assert = cc().arg("--help").assert().success();
+    let mut assert = assert;
+    for sub in SUBCOMMANDS {
+        assert = assert.stdout(contains(sub));
+    }
+    // The hidden command name must not appear as an advertised subcommand line.
+    assert.stdout(contains("ingest").not());
+}
+
+#[test]
+fn ingest_help_is_reachable() {
+    // Hidden does NOT mean unreachable: `ingest --help` parses, exits 0, and its own help
+    // mentions the `<CHUNKS_JSON>` positional + the shared `--db-path` flag (§7.2).
+    cc().args(["ingest", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--db-path"))
+        .stdout(contains("CHUNKS_JSON"));
+}
+
+#[test]
+fn ingest_requires_chunks_json_positional() {
+    // The `<CHUNKS_JSON>` positional is required: a bare `ingest` is a clap parse error before any
+    // handler runs → nonzero exit + non-empty stderr, never a Rust panic.
+    cc().arg("ingest")
+        .assert()
+        .failure()
+        .stderr(predicate::str::is_empty().not())
+        .stderr(contains("panicked").not())
+        .stdout(contains("panicked").not());
+}

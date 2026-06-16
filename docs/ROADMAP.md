@@ -112,7 +112,7 @@ spend (R3). Kill criterion and null-result handling: `project_overview.md` §7.
 | Milestone | Work | Exit criteria |
 |---|---|---|
 | **R1 — Harness** | Minimal agent loop (or mini-SWE-agent fork) with pluggable retrieval tools; trajectory logging; ContextBench gold-context scorer | One task runs end-to-end in A0/A1/A4; metrics computed from logs |
-| **R2 — Offline ablations** | Layer-1 sweeps: chunking × ranking × enrichment on **ContextBench-Lite** (RepoEval slice CUT — D27) | Real-corpus Layer-1 ablation over ContextBench-Lite + qualitative CodeRAG-Bench BM25 NDCG@10 = 0.932 reference; top configs picked (**softened from ±0.03 reproduction — D27**) |
+| **R2 — Offline ablations** ✅ **CLOSED (R2.7, D29, 2026-06-16)** | Layer-1 sweeps: chunking × ranking × enrichment on **ContextBench-Lite** (RepoEval slice CUT — D27) | **MET (softened — D27):** real-corpus Layer-1 ablation over ContextBench-Lite (R2.7: 10 tasks, 2 repos, file-level NDCG@10) + qualitative CodeRAG-Bench BM25 NDCG@10 = 0.932 reference; BM25 vectors separate on NDCG, chunker A/B directional + no winner asserted (D29) |
 | **R3 — Agent-in-loop study** | Full matrix on 30–50 tasks; promote winners to 100; budget/scale sweeps | RQ1–RQ3 plots with CIs; raw trajectories published |
 | **R4 — Write-up & release** | Preprint + artifact (binary, harness, data); blog distillation; one workshop submission | arXiv live; artifact reproduces the headline figure from a clean machine |
 
@@ -789,6 +789,61 @@ run** (both corpora produce 0 such records); (#2) the TODO doc-sync, reconciled 
 nit) a test re-defines a production helper locally. Cross-references **D23** (R2 staging + gate #3),
 **D25** (the ingest seam this rides), **D27** (the softened exit + R2.7 next). Owner: manager (this
 decision + doc-sync) + research-harness-engineer (R2.6 build) + code-reviewer (APPROVE).
+
+### D29 — R2.7 scoped real-corpus exit run: ContextBench-Lite (10 tasks, 2 repos) is the **R2 EXIT**; R2 track **CLOSED**  · **Adopted 2026-06-16 (human-ratified scoped run + gated build route, reviewer-APPROVED after a BLOCK→fix→APPROVE on a measurement bug)** (plan: research track R2.7; satisfies the D27 softened exit; builds on D24 `--bm25-weights` + D25 `ingest` + D28 astchunk arm) — *overview §5–§7*
+
+R2.7 is the **softened R2 exit (D27)**: a **scoped, directional** real-corpus Layer-1 ablation over
+**ContextBench-Lite** (`contextbench_verified`, Apache-2.0, EuniAI; arXiv:2602.05892) — **NOT** the full
+500 and **NOT** a ±0.03 reproduction of any published number (R2.5b CUT, D27). It closes the **R2.5a
+"mapper-only" gap**: R2.5a's `contextbench.py` mapped records → `SweepQuery` (query + gold labels) only —
+it **did not materialize a searchable corpus**. The Lite HF schema ships `repo`/`repo_url`/`base_commit`/
+`gold_context`/`problem_statement`/`language`/`patch` but **no repository source and no retrieval pool**;
+the searchable corpus exists only by **cloning each task's repo at its `base_commit`** and indexing the
+whole tree (indexing only gold files would make recall trivially 1.0). R2.7 builds that materializer.
+
+**Apparatus (NEW, pure `research/`).** `r1harness/contextbench_corpus.py` = a **deterministic task selector**
+(filter `language ∈ {python, typescript}` → stable sort by `(repo, instance_id)` → greedy repo admission to
+`max_repos` → task cap to `max_tasks`) + a **corpus materializer** (`git clone --no-checkout` once per repo
+into a **gitignored** `cache/contextbench_repos/`, then `git worktree add <task_dir> <base_commit>` per task;
+clone/worktree failure → typed `CorpusMaterializeError` / skip-with-log, no crash; idempotent re-run).
+`run_contextbench_exit.py` = the run entrypoint (missing-cache → clean nonzero exit). **R2.7 needs
+network + git** for the one-time clones (D26 envelope — research-harness only, zero paid spend); **the
+product (codecache binary) stays fully air-gapped**, and the **pytest suite stays hermetic** (selector +
+materializer pure helpers + git-failure tested with mocks; the real clone+index is the integration RUN, not
+a unit test). No crate change — rides the existing `--bm25-weights` (D24) and `ingest` (D25) seams.
+
+**Result (directional, scoped — n=10 over 2 repos; NO winner asserted).** Selected **10 tasks**: 5 ×
+`pytest-dev/pytest` (python) + 5 × `vuejs/core` (typescript) — astropy excluded for clone/index cost
+(~13 min/task on the debug binary). **Run 1 (BM25 6-vector sweep, native chunker)** at file-level NDCG@10:
+`body_heavy` **0.197** (best) > default/flat/name_strong **0.173** > enrich_heavy 0.160 > name_only 0.153;
+**Recall@10 saturates flat at 0.233 across all 6 vectors** — so the **D21/D28 Recall-saturation finding
+persists on the real corpus, but the NDCG ordering is no longer masked** (unlike the D28 micro-suite where
+5/6 vectors tied on NDCG). **Run 2 (chunker A/B, default weights, under PROPER per-arm DB isolation)** at
+file-level: native NDCG@10 **0.173** vs astchunk **0.249**; Recall@10 native 0.233 vs astchunk 0.367. The
+gap is **real but small, n=10, and language-confounded**: the 3/10 astchunk-wins are all python (pytest);
+the typescript arm (vuejs/core) is mostly both-zero — a **`.ts`-only file cap excludes `.tsx`/`.vue`**, the
+leading hypothesis for vuejs gold files going unindexed, so the TS near-zero is a **coverage artifact, not a
+chunker signal**. **No winner asserted** — a defensible claim needs R3 scale (≥50 tasks/language on the
+release binary).
+
+**Measurement bug caught + fixed in review (the value of the BLOCK gate).** The first Run-2 build ran BOTH
+arms against the **same `task_dir`**: native `init`+`index` then astchunk `init`+`ingest`. Because
+`codecache init` is idempotent (no DB reset) and `ingest` **appends** (`insert_chunks`, no DELETE), the
+astchunk arm queried the **union of native + astchunk chunks** — a comparison that trivially cannot lose; the
+original +44% was an **artifact**. Reviewer **BLOCKED**; the fix isolates each arm into its own scratch dir
+(`native_{i}/`, `astchunk_{i}/`, each a fresh `.codecache/`, identical source file set via `_copy_source_files`)
+mirroring the reviewed `ab_runner.run_ab_astchunk` pattern. Re-run under isolation reproduced the corrected
+table; reviewer **APPROVE**. Also fixed: a `norecursedirs` pytest-collection bug (the cloned repos' own test
+files were collected after a run). Gates: **166 passed, 1 skipped** (Windows-only path skip) in the venv,
+ruff check + format clean. `Cargo.toml`/`src/`/Rust-`tests/`/`.claude/settings.json` untouched.
+
+**R2 TRACK CLOSED.** This is the last R2 slice; the softened D27 exit is satisfied (real-corpus ablation over
+ContextBench-Lite + the qualitative CodeRAG-Bench BM25 NDCG@10 = 0.932 reference, paper Table 3,
+arXiv:2406.14497, cited but NOT reproduced). Empirical headline carried into R3: **the real corpus does
+separate the BM25 vectors on NDCG (it un-masks the ordering that micro-suite Recall-saturation hid), and the
+chunker A/B is directionally astchunk-favoring but too small + language-confounded to assert** — R3 takes the
+full A0–A5 matrix to scale. Owner: manager (this decision + doc-sync + commit) + research-harness-engineer
+(R2.7 build + run) + code-reviewer (BLOCK→APPROVE). Brief: `.claude/briefs/BRIEF-R2.7-contextbench-exit-run.md`.
 
 ---
 

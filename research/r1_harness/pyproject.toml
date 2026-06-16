@@ -8,6 +8,7 @@ license = { text = "MIT OR Apache-2.0" }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+norecursedirs = ["cache", "runs", ".venv", "vendor"]
 
 [tool.ruff]
 line-length = 120

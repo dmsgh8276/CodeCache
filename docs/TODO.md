@@ -342,9 +342,10 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
             (`--model-class litellm_textbased`, the mode llama3/phi3 also need) drives every arm reliably.
             Also fixed a measurement bug (grep `./`-prefix split one file into two retrieved entries →
             corrupted Recall@1; +regression test). **R1 exit now met LIVE — no arm-winner claim (that is R3).**
-- [~] **R2 offline ablations** (D23 adopted 2026-06-14; owner: research-harness-engineer; ungated R2.1–R2.4
-      DONE; external-corpus gates ratified D26 2026-06-15 — R2.5 complete-as-R2.5a; **R2.5b CUT, R2 exit
-      softened — D27 2026-06-15**; **R2.6 DONE 2026-06-15 — astchunk dep GRANTED, D28**; R2.7 NEXT):
+- [x] **R2 offline ablations — TRACK COMPLETE 2026-06-16 (D29)** (D23 adopted 2026-06-14; owner:
+      research-harness-engineer; ungated R2.1–R2.4 DONE; external-corpus gates ratified D26 2026-06-15 —
+      R2.5 complete-as-R2.5a; **R2.5b CUT, R2 exit softened — D27 2026-06-15**; **R2.6 DONE 2026-06-15 —
+      astchunk dep GRANTED, D28**; **R2.7 DONE 2026-06-16 — scoped real-corpus exit, D29; softened exit MET**):
       chunking × ranking × enrichment, Layer-1 only, zero LLM/agent/paid spend. **Exit (softened — D27):** run
       the real-corpus Layer-1 ablation over **ContextBench-Lite** (R2.5a, DONE) + cite CodeRAG-Bench's
       published **BM25 NDCG@10 = 0.932** qualitatively (NOT a ±0.03 in-repo reproduction) + pick top configs.
@@ -483,12 +484,33 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
               0 such records). Suggested fix: skip chunks where `not chunk_text.strip()`. → research-harness-engineer
         - [ ] **R2.6 nit (review finding #3, ignore-or-track):** a test re-defines `_astchunk_chunk_corpus` locally
               instead of importing the production helper — cosmetic; not worth churn. → research-harness-engineer
-      - [ ] **R2.7 baseline-reproduction + exit run — NEXT — SOFTENED (D27, 2026-06-15)** — **no ±0.03 in-repo
-            reproduction** (R2.5b CUT). Run the real-corpus Layer-1 ablation over **ContextBench-Lite** (R2.5a) +
-            the ~12-cell grid (now with the R2.6 astchunk arm as the chunker axis) + cite CodeRAG-Bench's published
-            **BM25 NDCG@10 = 0.932** qualitatively (paper Table 3, arXiv:2406.14497) + promote top configs. The R2.6
-            file-level tie over the micro-suite (D28) is the empirical case that the **real corpus** is what
-            separates the chunkers. Satisfies the softened R2 exit. → research-harness-engineer + manager (exit verify)
+            - [x] **R2.7 scoped real-corpus exit run — DONE 2026-06-16 — code-reviewer APPROVED (BLOCK→fix→APPROVE);
+            R2 TRACK COMPLETE (D29).** The softened R2 exit (D27): a **scoped, directional** real-corpus Layer-1
+            ablation over **ContextBench-Lite** (`contextbench_verified`, Apache-2.0) — NOT full-500, NOT a ±0.03
+            reproduction (R2.5b CUT). Closes the **R2.5a "mapper-only" gap**: R2.5a mapped records → `SweepQuery`
+            (query + gold) only; R2.7 **builds the corpus** the searchable index needs. NEW
+            `r1harness/contextbench_corpus.py` = deterministic **task selector** (filter py/ts → stable sort
+            `(repo, instance_id)` → greedy repo-cap → task-cap) + **materializer** (`git clone --no-checkout` once
+            per repo into gitignored `cache/contextbench_repos/`, `git worktree add` per task at `base_commit`;
+            failure → typed `CorpusMaterializeError`/skip-with-log, no crash; idempotent) + `run_contextbench_exit.py`
+            entrypoint (missing-cache → clean nonzero exit). **R2.7 needs network + git** for the one-time clones (D26
+            envelope — research-harness only, zero spend; **product stays air-gapped**); pytest stays **hermetic**
+            (selector + pure helpers + git-failure mocked; the clone+index is the integration RUN, not a unit test).
+            No crate change — rides `--bm25-weights` (D24) + `ingest` (D25). **Result (n=10: 5 pytest-dev/pytest
+            python + 5 vuejs/core typescript; astropy excluded for cost):** Run 1 (BM25 6-vector sweep, native)
+            file-level NDCG@10 — `body_heavy` **0.197** best > default/flat/name_strong **0.173** > enrich_heavy
+            0.160 > name_only 0.153; **Recall@10 saturates flat 0.233** (D21/D28 saturation persists) but **NDCG
+            ordering is un-masked** (vs the D28 micro-suite where 5/6 tied). Run 2 (chunker A/B, default weights,
+            **proper per-arm DB isolation**) file-level NDCG@10 native **0.173** vs astchunk **0.249** — real but
+            small, **n=10, language-confounded** (3/10 astchunk-wins all python; TS arm mostly both-zero — a
+            **`.ts`-only file cap excludes `.tsx`/`.vue`**, a coverage artifact, not a chunker signal). **No winner
+            asserted.** **Review caught + fixed a measurement bug** (first build ran both arms on the same `task_dir`
+            → astchunk arm queried native ∪ astchunk; idempotent `init` + appending `ingest` → +44% was an artifact;
+            BLOCK → isolate each arm into its own scratch `.codecache/` + symmetric file set → APPROVE). Also fixed a
+            `norecursedirs` pytest-collection bug (cloned repos' test files collected after a run). **166 passed, 1
+            skipped** (Windows-only path skip) in the venv; ruff check + format clean. `Cargo.toml`/`src/`/Rust-
+            `tests/`/`.claude/settings.json` untouched; clones + `runs/` gitignored. Brief:
+            `.claude/briefs/BRIEF-R2.7-contextbench-exit-run.md`. → **R2 CLOSED; R3 next (agent-in-loop, gated $1K).**
 - [ ] **R3 agent-in-loop study**: full A0–A5 matrix on 30–50 tasks → promote winners to 100;
       budget/scale sweeps; RQ1–RQ3 plots with CIs; ~$1K API line item → manager + perf
 - [ ] **R4 write-up & release**: preprint + artifact (binary, harness, trajectories); blog;

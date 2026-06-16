@@ -18,9 +18,11 @@ binary). The main session drove **R1** (D22). The `principal-engineering-manager
     the astchunk/cAST chunker dropped into that same A/B plumbing, native-vs-astchunk; D28),
     `ablation_report.py`+`run_report.py` (R2.4 ablation-table reporter — aggregates sweep + A/B into a single
     Markdown view with n_queries-weighted A/B aggregation, directional top-config selection, and scope-honesty
-    disclaimer; pure core + thin loaders + entrypoint), and `contextbench.py`+`fetch_contextbench.py`
+    disclaimer; pure core + thin loaders + entrypoint), `contextbench.py`+`fetch_contextbench.py`
     (R2.5a external-corpus loader — pure mapper core + thin fetch entrypoint for the ContextBench-Lite HF
-    dataset; see "External-corpus provenance" below).
+    dataset; see "External-corpus provenance" below), and `contextbench_corpus.py`+`run_contextbench_exit.py`
+    (R2.7 scoped real-corpus exit run — the **corpus materializer** R2.5a deliberately left out, + the run
+    entrypoint; see "R2.7 corpus materializer" below).
     Real-run outputs land under `r1_harness/runs/`.
 
 ## Rules (different from the Rust crate)
@@ -69,7 +71,32 @@ on the system `python3`** (which lacks the dep). Always run via the venv Python:
 ```
 PYTHONUTF8=1 research/r1_harness/.venv/bin/python -m pytest research/r1_harness/
 ```
-Green baseline = **138 passed, 1 skipped** (the skip = the Windows-only path test).
+Green baseline = **166 passed, 1 skipped** (the skip = the Windows-only path test; bumped from 138 at
+R2.7, +28 `test_contextbench_corpus.py` tests). After a real R2.7 run, the cloned repos under
+`cache/contextbench_repos/` contain their own test files — `pyproject.toml` `norecursedirs`
+(`cache`, `runs`, `.venv`, `vendor`) keeps `pytest` collecting only `tests/` regardless of invocation.
+
+## R2.7 corpus materializer + network/git boundary (D29)
+`r1harness/contextbench_corpus.py` (R2.7) is the **corpus materializer** that R2.5a's mapper deliberately
+left out. R2.5a's `contextbench.py` maps ContextBench-Lite records → `SweepQuery` (query + gold labels)
+**only** — it does **not** materialize a searchable corpus (the "mapper-only" gap). The Lite HF schema ships
+`repo`/`repo_url`/`base_commit`/`gold_context`/`problem_statement`/`language`/`patch` but **no repository
+source and no retrieval pool**; the searchable corpus exists only by **cloning each task's repo at its
+`base_commit`** and indexing the whole tree (indexing only gold files would make recall trivially 1.0).
+`contextbench_corpus.py` = a deterministic **task selector** (filter py/ts → stable sort `(repo, instance_id)`
+→ greedy repo-cap → task-cap) + a **materializer** (`git clone --no-checkout` once per repo into a gitignored
+cache, `git worktree add` per task; failure → typed `CorpusMaterializeError`/skip-with-log, no crash;
+idempotent). `run_contextbench_exit.py` is the run entrypoint.
+
+- **R2.7 needs network + git** (the one-time `git clone` of each task's repo). This is the **R2.5a/D26
+  envelope**: research-harness only, **zero paid spend**. **GitHub git egress works** (`git clone`/`ls-remote`);
+  only `api.github.com` REST is proxy-blocked (not needed). The **product (codecache binary) stays fully
+  air-gapped** — only the research harness clones.
+- **Repo-clone cache:** `r1_harness/cache/contextbench_repos/` (bare/no-checkout clones + per-task worktrees).
+  **Gitignored** — NEVER commit cloned repos or downloaded blobs (covered by the `cache/` rule + an explicit
+  `cache/contextbench_repos/` line in `research/r1_harness/.gitignore`).
+- **The pytest suite stays hermetic** — the selector + materializer pure helpers + the git-failure path are
+  tested with mocks; the real clone+index is the integration **RUN** (`run_contextbench_exit.py`), not a unit test.
 
 ## External-corpus provenance (R2.5a, D26)
 **ContextBench-Lite** (`r1harness/contextbench.py`, `fetch_contextbench.py`):
@@ -99,5 +126,5 @@ crate's golden rule.
 
 **Run the suite from the venv** (`PYTHONUTF8=1 research/r1_harness/.venv/bin/python -m pytest
 research/r1_harness/`), not the system `python3` — since R2.6 the suite depends on `astchunk` (MIT)
-and FAILS without it. Green baseline = **138 passed, 1 skipped**. Full canonical run + the ruff
-gates are in `docs/TESTING_AND_USAGE.md` §3.0.
+and FAILS without it. Green baseline = **166 passed, 1 skipped** (bumped from 138 at R2.7). Full
+canonical run + the ruff gates are in `docs/TESTING_AND_USAGE.md` §3.0.

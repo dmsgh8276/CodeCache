@@ -19,6 +19,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `.claude/`, and `docs/` are excluded so they never reach the permanent public registry tarball.
   (Decision Log D31.)
 
+### Performance
+- **Batched cold-index inserts (Decision Log D20)** — the indexer now writes a whole index run's
+  per-file rows inside **one outer transaction** (a SAVEPOINT per file) instead of a commit per
+  file, amortizing ~N fsyncs into one. New additive `Storage::write_in_transaction` primitive;
+  **D2 per-file error isolation preserved** (a malformed/unreadable/failing file rolls back only its
+  own savepoint and is skipped — the batch still succeeds and siblings commit). Resolves the only
+  M10.1 budget miss: 10K-LOC cold index measured **5.84 s → 1.37 s (−76.5%, WSL2/Linux, well under
+  the < 5 s budget)**; Windows CI is the authoritative gate for the budget verdict.
+
 ---
 
 ## [0.1.0] - 2026-06-12

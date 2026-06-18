@@ -68,6 +68,13 @@ this document is the source for "what scenarios must a slice cover" referenced b
   totals (`total_files`/`total_chunks`) updated (§5.1 step 4); `IndexStats` counts + `duration_ms`.
 - Malformed file in a full index does not abort the batch (**D2**): `index_all` returns `Ok`, the
   bad file is skipped/heuristically chunked, and sibling valid files are still indexed.
+- **D20 (batch inserts):** the per-file writes of a run are batched into ONE outer transaction with a
+  SAVEPOINT per file, preserving D2. (a) A file failing mid-batch at the READ stage (invalid UTF-8)
+  does not discard committed siblings — `index_all` is `Ok`, all valid files searchable,
+  `files_processed`/totals count only the committed files (`indexer_tests::unreadable_file_mid_batch_…`).
+  (b) Storage savepoint primitive `write_in_transaction` (storage_tests): one item's `Err` rolls back
+  only that item's in-savepoint partial write while sibling items commit in the same outer
+  transaction; per-item `Vec<Result<()>>` preserves order; the outer call still returns `Ok`.
 - Incremental: re-index unchanged ⇒ no writes (idempotent); modify N files ⇒ exactly those re-indexed.
 - `update_files(&[..])` re-indexes exactly the changed files in the list (hash-filtered); a modified
   file's new symbol becomes searchable while untouched files keep their hash/chunks.

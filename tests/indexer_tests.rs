@@ -402,6 +402,74 @@ fn malformed_file_in_repo_does_not_abort_index() {
     );
 }
 
+// ═══════════════ Slice M10 / D20 — batch inserts (one outer transaction) ═══════════════
+//
+// D20: the indexer batches every per-file write across a run into ONE outer transaction to
+// amortize commit/fsync overhead, with a SAVEPOINT per file so one file's DB error rolls back only
+// that file (preserving D2). The tests below pin the OBSERVABLE behavior of the batched path so the
+// eng lead is free in HOW it batches (the savepoint primitive itself is pinned in
+// `storage_tests.rs::write_in_transaction_*`). They must hold against the new wiring without
+// changing any public `Indexer` signature.
+
+#[test]
+fn unreadable_file_mid_batch_does_not_discard_committed_siblings() {
+    // D2 UNDER BATCHING — a DIFFERENT failure stage than `malformed_file_in_repo_does_not_abort_index`
+    // (that one fails at PARSE; the chunker degrades and usually returns Ok BEFORE any DB write). Here
+    // a file fails at the READ stage (invalid UTF-8 ⇒ `read_to_string` errors ⇒ `IndexError::File`),
+    // which surfaces a per-file Err that the pipeline isolates INSIDE the batched outer transaction.
+    // Several valid siblings are indexed in the SAME run: `index_all` must return Ok, every valid
+    // file's symbol must be searchable (none discarded by the bad file's failure), and totals must
+    // reflect exactly the valid files. This is the indexer-surface proof that one file's mid-batch
+    // failure does not roll back / abort the whole batch.
+    let repo = temp_repo();
+    let root = repo.path();
+    write_file(root, "v1.py", "def v1_fn():\n    return 1\n");
+    write_file(root, "v2.py", "def v2_fn():\n    return 2\n");
+    write_file(root, "v3.py", "def v3_fn():\n    return 3\n");
+    // A real .py file (discovered) whose bytes are NOT valid UTF-8 ⇒ read_to_string fails ⇒ the
+    // per-file pipeline errors mid-batch. Deterministic + reaches the per-file write path's caller.
+    fs::write(
+        root.join("unreadable.py"),
+        [0x66, 0x6e, 0xff, 0xfe, 0x00, 0x80],
+    )
+    .expect("write invalid-UTF-8 .py file");
+
+    let storage = fresh_storage(root);
+    let mut indexer = python_indexer(root, storage.clone());
+
+    let result = indexer.index_all();
+    assert!(
+        result.is_ok(),
+        "a file failing mid-batch (read error) must NOT abort the batched index (D2): {result:?}"
+    );
+
+    // All THREE valid siblings survived the batch — the bad file did not roll them back.
+    for sym in ["v1_fn", "v2_fn", "v3_fn"] {
+        let hits = searchable_symbols(&storage, sym);
+        assert!(
+            hits.iter().any(|n| n == sym),
+            "valid sibling symbol {sym:?} must be committed even though a batch-mate failed, got {hits:?}"
+        );
+    }
+    // The unreadable file contributed nothing and was not counted.
+    let stats = result.expect("ok");
+    assert_eq!(
+        stats.files_processed, 3,
+        "exactly the three valid files are processed; the unreadable one is skipped (D2)"
+    );
+    // index_state totals reflect only the committed valid files (the bad file has no metadata row).
+    assert_eq!(
+        index_state_count(&storage, "total_files"),
+        3,
+        "total_files counts only the files that actually committed"
+    );
+    assert_eq!(
+        index_state_count(&storage, "total_chunks"),
+        3,
+        "total_chunks counts only the chunks that actually committed"
+    );
+}
+
 // ═════════════ Slice M5.3 — incremental + idempotency + delete ═════════════
 //
 // API under test (pinned for the engineering lead):

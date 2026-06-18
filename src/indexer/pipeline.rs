@@ -1,41 +1,66 @@
-//! Per-file indexing pipeline (slice M5.2).
+//! Per-file indexing pipeline (slice M5.2; batched per Decision Log **D20**).
 //!
-//! API anchor: `project_plan.md` §5.1 (step 3a–3e). Owner: `principal-engineering-lead`.
-//! Scenarios: `docs/TEST_STRATEGY.md#indexer` (full-index rows + D2).
+//! API anchor: `project_plan.md` §5.1 (step 3a–3e) + §3.2.2 (`write_in_transaction`). Owner:
+//! `principal-engineering-lead`. Scenarios: `docs/TEST_STRATEGY.md#indexer` (full-index rows + D2).
 //!
-//! [`index_file`] performs the per-file work of a full index for one discovered source file:
-//! compute hash → read content → detect language → parse → chunk → `insert_chunks` → write the
-//! `files_metadata` row. It returns the number of chunks inserted so the caller can accumulate
+//! [`reindex_file_batched`] performs the per-file work of an index run for one discovered source
+//! file: delete-first → compute hash → read content → detect language → parse → chunk →
+//! `insert_chunks` → write the `files_metadata` row, all through a savepoint-scoped
+//! [`BatchWriter`] so the whole run commits once (D20) while a single file's failure rolls back only
+//! that file (D2). It returns the number of chunks inserted so the caller can accumulate
 //! [`IndexStats`](super::IndexStats). Each fallible step surfaces a typed [`IndexError`] via `?`;
-//! the caller (`index_all`) wraps the whole call so a single file's error is counted/skipped and
-//! the batch continues (D2 degrade-and-continue) — there is no reachable `unwrap`/`expect`/`panic`.
+//! the caller (`index_all`) maps that per-file error to a savepoint rollback so the batch continues
+//! (D2 degrade-and-continue) — there is no reachable `unwrap`/`expect`/`panic`.
 
 use std::path::{Path, PathBuf};
 
 use crate::chunker;
 use crate::hasher;
 use crate::parser::Parser;
-use crate::storage::Storage;
-use crate::types::{FileMeta, Language};
+use crate::storage::{BatchWriter, Storage};
+use crate::types::{Chunk, FileMeta, Language};
 
 use super::{detect_language, IndexError};
 
-/// Index one source file: hash, read, parse, chunk, store its chunks, and upsert its
-/// `files_metadata` row (`project_plan.md` §5.1 step 3a–3e). Returns the count of chunks inserted.
-///
-/// The chunker handles a malformed tree gracefully (heuristic fallback or empty), so a syntactically
-/// broken file does not error here; it is the unreadable/unsupported-language/storage failures that
-/// surface an [`IndexError`] for the caller to isolate (D2).
+/// Per-file index work routed through a savepoint-scoped [`BatchWriter`] inside the run's single
+/// outer transaction ([`Storage::write_in_transaction`], Decision Log **D20**): delete-first → hash
+/// → read → parse → chunk → `insert_chunks` → `update_file_hash`, all participating in this file's
+/// SAVEPOINT. A per-file failure (read/parse/chunk/store) returns `Err` so the caller's savepoint
+/// rolls back ONLY this file (D2 isolation) while the committed siblings survive the single outer
+/// commit; the read-stage `IndexError::File` is exactly the path the `unreadable_file_mid_batch_…`
+/// guard exercises. Returns the count of chunks inserted so the caller can accumulate
+/// [`IndexStats`](super::IndexStats) for the files whose savepoint committed.
 ///
 /// # Errors
-/// Returns [`IndexError::Hash`] if hashing fails, [`IndexError::File`] if the content/metadata
-/// cannot be read, [`IndexError::Parser`]/[`IndexError::Chunker`] on parse/chunk failure, and
-/// [`IndexError::Storage`] if the chunk insert or metadata upsert fails.
-pub fn index_file(
+/// [`IndexError::Hash`] if hashing fails, [`IndexError::File`] if the content/metadata cannot be
+/// read, [`IndexError::Parser`]/[`IndexError::Chunker`] on parse/chunk failure, and
+/// [`IndexError::Storage`] if the delete/insert/upsert through `writer` fails.
+pub fn reindex_file_batched(
     parser: &mut Parser,
-    storage: &Storage,
+    writer: &BatchWriter<'_>,
     path: &Path,
 ) -> Result<usize, IndexError> {
+    // Delete-first (within the savepoint) avoids duplicate/stale chunks across re-indexes.
+    writer
+        .delete_chunks_for_file(path)
+        .map_err(IndexError::Storage)?;
+
+    let (chunks, meta) = extract_file(parser, path)?;
+
+    // §5.1 step 3d–3e: store chunks + upsert the metadata row, both in this file's savepoint.
+    writer.insert_chunks(&chunks).map_err(IndexError::Storage)?;
+    writer
+        .update_file_hash(path, &meta)
+        .map_err(IndexError::Storage)?;
+
+    Ok(chunks.len())
+}
+
+/// The read-only half of the per-file pipeline (§5.1 step 3a–3c): hash → read content+metadata →
+/// detect language → parse → chunk → stamp `file_path`, returning the chunks plus the [`FileMeta`]
+/// the caller persists. Shared so the write side stays the only difference between the autocommit
+/// and batched (savepoint) paths. Does no DB writes, so it touches no transaction state.
+fn extract_file(parser: &mut Parser, path: &Path) -> Result<(Vec<Chunk>, FileMeta), IndexError> {
     // §5.1 step 3a: content+mtime hash (the value stored in files_metadata.content_hash).
     let content_hash = hasher::compute_file_hash(path).map_err(IndexError::Hash)?;
 
@@ -68,13 +93,6 @@ pub fn index_file(
     }
 
     let chunk_count = chunks.len();
-
-    // §5.1 step 3d: store chunks (single transaction inside insert_chunks).
-    storage
-        .insert_chunks(&chunks)
-        .map_err(IndexError::Storage)?;
-
-    // §5.1 step 3e: upsert the file's metadata row (D6 bundle).
     let meta = FileMeta {
         content_hash,
         mtime,
@@ -82,30 +100,7 @@ pub fn index_file(
         language,
         chunk_count,
     };
-    storage
-        .update_file_hash(path, &meta)
-        .map_err(IndexError::Storage)?;
-
-    Ok(chunk_count)
-}
-
-/// Re-index a file whose content changed: delete its existing chunks first (so the previous
-/// symbols do not linger or duplicate), then run the normal per-file [`index_file`] path. The
-/// `files_metadata` row is upserted by `index_file`, so the stored hash/mtime/chunk_count are
-/// replaced. Returns the count of chunks inserted (§5.2).
-///
-/// # Errors
-/// Propagates [`IndexError::Storage`] if the delete fails, plus any [`index_file`] error.
-pub fn reindex_file(
-    parser: &mut Parser,
-    storage: &Storage,
-    path: &Path,
-) -> Result<usize, IndexError> {
-    // Delete-first avoids duplicate/stale chunks for the file across re-indexes.
-    storage
-        .delete_chunks_for_file(path)
-        .map_err(IndexError::Storage)?;
-    index_file(parser, storage, path)
+    Ok((chunks, meta))
 }
 
 /// Of the candidate `files`, return those whose on-disk content hash differs from the stored hash
@@ -165,8 +160,19 @@ mod tests {
         storage.init_schema().expect("init schema");
         let mut parser = Parser::new().expect("build parser");
 
-        // Index once: stores the content+mtime hash that detect_changed_files will compare against.
-        index_file(&mut parser, &storage, &file).expect("index_file");
+        // Index once (through the batched D20 path): stores the content+mtime hash that
+        // detect_changed_files will compare against.
+        let files = [file.clone()];
+        storage
+            .write_in_transaction(&files, |writer, f| {
+                reindex_file_batched(&mut parser, writer, f)
+                    .map(|_| ())
+                    .map_err(|e| match e {
+                        IndexError::Storage(se) => se,
+                        other => crate::storage::StorageError::BatchItem(other.to_string()),
+                    })
+            })
+            .expect("seed via write_in_transaction");
 
         let changed =
             detect_changed_files(&storage, &[file.clone()]).expect("detect_changed_files");

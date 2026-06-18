@@ -385,6 +385,28 @@ cross-file transaction batching in the indexer to bring 10K cold-index under 5 s
 is documented honestly in the release notes (CHANGELOG, M10.4). Owner: manager (this decision) +
 performance-bench-engineer (measurement) + engineering-lead (the future optimization slice).
 
+**RESOLVED 2026-06-17 (v0.1.x perf slice; test-first; reviewer-APPROVED; uncommitted at hand-off).**
+The follow-up shipped as a full TDD cycle (brief: `.claude/briefs/BRIEF-M10-D20-batch-inserts.md`).
+**Fix:** an additive storage primitive `Storage::write_in_transaction<T, F>(items, each) ->
+Result<Vec<Result<()>>>` (plan §3.2.2) runs the indexer's per-file work inside **one outer
+transaction**, isolating each file in its own **SAVEPOINT** (`Ok` ⇒ RELEASE, `Err` ⇒ ROLLBACK TO +
+record + CONTINUE), committing the outer tx once. `BatchWriter<'a>` lends `insert_chunks` /
+`delete_chunks_for_file` / `update_file_hash` against the current savepoint over the same D8
+connection (no re-lock/deadlock). `indexer::index_all`/`update_files` drive all changed/new files
+through one such call; `detect_changed_files` still runs first, so unchanged files open no savepoint
+(idempotency held). **D2 preserved naturally** — the savepoint-per-file design means a parse-, read-,
+or DB-stage per-file failure rolls back only that file and is counted-as-skipped, the batch returns
+`Ok`, and siblings commit (verified by RED tests at both the storage primitive and indexer surfaces;
+no existing test weakened). One additive, internal `StorageError::BatchItem(String)` variant carries
+the rolled-back-item signal (never surfaced; the indexer just skip-counts). **Measured (this WSL2/
+Linux machine, Rust 1.85, release):** 10K cold-index p50 **5.84 s → 1.37 s (−76.5%)**, p95 1.57 s —
+both well under < 5 s here (the unbatched 5.84 s closely matches the Win11 6.04 s, confirming commit/
+fsync count was the bottleneck, not parse/FTS5). **Windows CI is the authoritative budget gate** — the
+`benches/CLAUDE.md` budget table stays MISS-on-Win11-pending until a Windows CI/local run confirms
+< 5 s there; the speedup mechanism (≈200 fsyncs → 1) is platform-independent, so a Windows pass is
+strongly expected. Owners as above; reviewer APPROVED (savepoint commit/rollback semantics verified
+against rusqlite 0.32.1 source).
+
 ### D21 — M10.2 Layer-1 scoring ships a 15-query offline micro-suite proxy (not the full ContextBench / not 5×15)  · **Adopted at M10.2** (plan: M10.2; research: R2) — *overview §5.1–5.2; Decision Log D16*
 D16 reframed v0.1 evaluation to Layer-1 retrieval-quality scoring vs gold contexts, with **no hard
 gate at M10** ("recorded vs gold"; the Layer-2 dominance headline is R3). M10.2 delivers a

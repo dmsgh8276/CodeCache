@@ -43,13 +43,32 @@ incremental idempotency; modify N ⇒ exactly N re-indexed; delete removes chunk
 - `IndexError` extended with per-file/store variants: `File{path,source}`, `Hash`, `Parser`,
   `Chunker`, `Storage` (in addition to M5.1 `Io`/`Glob`). Typed, `impl Error` + `source()` chain.
 
-### D2 per-file isolation
-`index_all` wraps each `index_file` call in a `match`: on `Ok(n)` it adds to the stats; on `Err`
-it counts the file as skipped and continues. The batch never aborts on one bad file — `index_all`
-returns `Ok`. The chunker already degrades a malformed tree internally (heuristic fallback / empty
-via `error_rate`), so a syntactically broken file usually returns `Ok(0..)`; any residual per-file
-error (unreadable, store failure) is still caught here. Only non-isolatable failures (discovery,
-the `index_state` totals write) propagate as `Err`.
+### D2 per-file isolation (batched per D20 — see below)
+Each changed/new file's per-file work runs inside its own **SAVEPOINT** within the run's single
+outer transaction (`reindex_each` → `Storage::write_in_transaction`): on success the savepoint is
+released; on a per-file failure (read/parse/chunk/store) it is rolled back ONLY for that file and the
+file is **counted-as-skipped**, while the committed siblings survive the single outer commit. The
+batch never aborts on one bad file — `index_all` returns `Ok`. The chunker already degrades a
+malformed tree internally (heuristic fallback / empty via `error_rate`), so a syntactically broken
+file usually returns `Ok(0..)`; a read-stage error (unreadable/invalid-UTF-8 file) or store failure
+is isolated by the savepoint. Only non-isolatable failures (discovery, the outer begin/commit, a
+savepoint begin/release/rollback, a poisoned lock, the `index_state` totals write) propagate as
+`Err`. Guards: parse-stage `malformed_file_in_repo_does_not_abort_index` + read-stage
+`unreadable_file_mid_batch_does_not_discard_committed_siblings`.
+
+### D20 — cold-index transaction batching (2026-06-17)
+The old per-file `index_file` (its own `insert_chunks` transaction + autocommit `update_file_hash`)
+paid ~N commit fsyncs for an N-file index — the M10.1 10K-cold-index miss (6.04 s vs < 5 s). The
+indexer now drives all changed/new files through ONE `Storage::write_in_transaction` call (plan
+§3.2.2): `pipeline::reindex_file_batched(parser, &BatchWriter, path)` does delete-first → insert →
+`update_file_hash` inside the file's savepoint, and `pipeline::extract_file` is the shared read-only
+half (hash → read → parse → chunk → stamp `file_path`) that does no DB writes. `reindex_each` now
+returns `Result<IndexStats, IndexError>` (was infallible) and maps each per-file `IndexError` to a
+savepoint-rollback signal via the internal `index_error_as_storage_signal`; `index_all`/`update_files`
+`?` it. `detect_changed_files` still runs BEFORE the batch, so an unchanged file opens no savepoint
+and is not re-stamped (idempotency held). Measured on this WSL2/Linux machine: 10K cold-index p50
+5.84 s → 1.37 s (−76.5%), well under < 5 s here (Windows CI is the authoritative budget gate). Brief:
+[`.claude/briefs/BRIEF-M10-D20-batch-inserts.md`](../../.claude/briefs/BRIEF-M10-D20-batch-inserts.md).
 
 ## Shipped API (M5.3 — incremental + idempotency + delete)
 - `pipeline.rs`:

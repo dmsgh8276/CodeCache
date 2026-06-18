@@ -384,6 +384,35 @@ impl Storage {
     // parameter (Decision Log D6) lets M5's incremental indexer record everything the
     // `files_metadata` row needs in one call.
     pub fn update_file_hash(&self, file_path: &Path, meta: &FileMeta) -> Result<()>;
+
+    // Batched multi-file write under ONE outer transaction (Decision Log D20, v0.1.x perf
+    // follow-up). M10.1 measured the 10K-LOC cold index at 6.04s vs the <5s budget — the only
+    // budget miss — because each per-file write committed its own transaction (≈200+ fsyncs for a
+    // 200-file index) on top of FTS5 write amplification. `write_in_transaction` runs `each` once
+    // per item inside a SINGLE outer transaction, isolating each item in its own SAVEPOINT:
+    //   each(writer, &items[i]) -> Ok(())  ⇒ RELEASE the savepoint (item's writes persist in the tx)
+    //   each(writer, &items[i]) -> Err(e)  ⇒ ROLLBACK TO the savepoint (discard the item's partial
+    //                                         writes), record Err(e), and CONTINUE the batch.
+    // The outer tx commits once at the end. Returns one inner `Result` per item (same order/length),
+    // so the indexer keeps D2 per-file isolation (a failing file is skipped, not aborted) while the
+    // whole batch pays a single commit/fsync. The OUTER `Result` is `Err` only for a non-isolatable
+    // failure (outer BEGIN/COMMIT, poisoned lock). `BatchWriter` lends the per-item write ops, each
+    // executing against the CURRENT savepoint over the SAME connection (D8) — it must NOT re-lock the
+    // `Arc<Mutex<Connection>>` inside the closure (re-entrant-lock deadlock). The non-batched
+    // `insert_chunks`/`delete_chunks_for_file`/`update_file_hash` above stay (autocommit) for
+    // single-shot callers such as `app::ingest_chunks` (§3.2.4). No reachable panic.
+    pub fn write_in_transaction<T, F>(&self, items: &[T], each: F) -> Result<Vec<Result<()>>>
+    where
+        F: FnMut(&BatchWriter<'_>, &T) -> Result<()>;
+}
+
+// Decision Log D20: lends the per-item write ops inside a `write_in_transaction` savepoint. Borrows
+// the open transaction (shares the single D8 connection); never re-locks `Storage`.
+pub struct BatchWriter<'a> { /* borrows the open tx/savepoint */ }
+impl BatchWriter<'_> {
+    pub fn insert_chunks(&self, chunks: &[Chunk]) -> Result<()>;
+    pub fn delete_chunks_for_file(&self, file_path: &Path) -> Result<()>;
+    pub fn update_file_hash(&self, file_path: &Path, meta: &FileMeta) -> Result<()>;
 }
 
 // Decision Log D6: the write-side metadata bundle for `files_metadata`.

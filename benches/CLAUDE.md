@@ -14,7 +14,7 @@ criterion bench compared against its documented budget; regressions are caught b
 | Query latency | p95 < 500ms (100K LOC) | M6 / M10 | p95 = 0.51 ms (M6.4: 1.17 ms) | PASS (≫ headroom) |
 | Full index size | < 100MB (100K-LOC synthetic) | M5 / M10 | 12.32 MB (12,922,880 B) | PASS (hard assert) |
 | Incremental re-index | < 2s (10-file change) | M5 / M10 | p50 = 190 ms | PASS (~10×) |
-| Cold index 10K LOC | < 5s | M10 | p50 = 6.04 s | **MISS — tracked, D20** |
+| Cold index 10K LOC | < 5s | M10 | Win11 p50 = 6.04 s; **D20 batching → WSL2/Linux p50 = 1.37 s** | **MISS-on-Win11 pending; PASS on Linux (D20)** |
 | Cold index 100K LOC | < 30s | M10 | p50 = 13.54 s | PASS (>2×) |
 | Hash 1K files | < 500ms | M10 | 459 ms total (compute_file_hash) | PASS (hard assert) |
 | Retrieval quality (L1) | recorded vs gold (no hard gate) | M10 (D16) | M10.2 | — |
@@ -44,6 +44,17 @@ index) plus per-iteration cold-DB creation on Windows. The harder 100K < 30 s ta
 >2× margin (non-monotonic vs budget confirms fixed per-iteration overhead, not algorithmic blowup).
 **Follow-up (v0.1.x):** batch inserts across files into one transaction (preserving D2 per-file
 isolation), then re-measure 10K cold index.
+
+**Follow-up RESOLVED 2026-06-17 (D20 batching).** `Storage::write_in_transaction` runs the whole
+index run's per-file writes inside one outer transaction (savepoint per file; D2 preserved). Measured
+on **this WSL2/Linux machine** (Rust 1.85, release, before/after via a `git worktree` at HEAD):
+10K cold-index p50 **5.84 s → 1.37 s (−76.5%)**, p95 6.18 s → 1.57 s — both well under < 5 s here.
+The unbatched 5.84 s on Linux closely tracks the Win11 6.04 s, confirming the bottleneck was
+commit/fsync COUNT (≈200 per-file commits → 1), not parse/tree-sitter/FTS5 work — so the speedup is
+platform-independent. **Windows CI remains the authoritative budget gate:** absolute timings are not
+comparable across machines, so the table stays "MISS-on-Win11 pending" until a Windows run confirms
+< 5 s there; a Windows pass is strongly expected given the mechanism. (Per the M10 assertion policy,
+machine-variable cold-index timings are trend-tracked, not hard-asserted in CI.)
 
 ### M10.1 — FTS5 query-plan baseline (EXPLAIN QUERY PLAN, persistent DB) — carried from M1/M6.4
 M6.4 deferred this because its bench DB was a per-run tempfile. Captured at M10.1 against a

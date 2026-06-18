@@ -34,6 +34,12 @@ pub enum StorageError {
     /// rendered as a SQL numeric literal, so it is rejected here rather than emitted into the query
     /// (R2.2a / D24). The CLI validates finiteness first, so this is a defensive storage-level guard.
     NonFiniteWeight(f64),
+    /// A single [`write_in_transaction`](Storage::write_in_transaction) item's closure failed and its
+    /// SAVEPOINT was rolled back, isolating the failure from its committed siblings (Decision Log
+    /// **D20**). Carries the underlying per-item error's description. This is the storage-layer signal
+    /// a caller (the indexer) maps a non-storage per-item failure into so the item rolls back and is
+    /// counted-as-skipped; it never aborts the outer transaction.
+    BatchItem(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -44,6 +50,9 @@ impl std::fmt::Display for StorageError {
             StorageError::CorruptRow(what) => write!(f, "corrupt stored row: {what}"),
             StorageError::NonFiniteWeight(w) => {
                 write!(f, "BM25 column weight must be finite, got {w}")
+            }
+            StorageError::BatchItem(what) => {
+                write!(f, "batch item failed and was rolled back: {what}")
             }
         }
     }
@@ -131,26 +140,7 @@ impl Storage {
     pub fn insert_chunks(&self, chunks: &[Chunk]) -> Result<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
-        {
-            let mut stmt = tx.prepare_cached(queries::INSERT_CHUNK)?;
-            for c in chunks {
-                stmt.execute(params![
-                    c.symbol_name,
-                    c.symbol_type.as_str(),
-                    c.chunk_text,
-                    c.parent_symbol,
-                    c.imports.join("\n"),
-                    c.cross_references.join("\n"),
-                    c.file_docstring,
-                    path_to_str(&c.file_path),
-                    c.start_byte as i64,
-                    c.end_byte as i64,
-                    c.start_line as i64,
-                    c.end_line as i64,
-                    c.language.as_str(),
-                ])?;
-            }
-        }
+        insert_chunks_on(&tx, chunks)?;
         tx.commit()?;
         Ok(())
     }
@@ -158,10 +148,7 @@ impl Storage {
     /// Delete all `symbols` rows for `file_path` (incremental update support).
     pub fn delete_chunks_for_file(&self, file_path: &Path) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute(
-            queries::DELETE_CHUNKS_FOR_FILE,
-            params![path_to_str(file_path)],
-        )?;
+        delete_chunks_for_file_on(&conn, file_path)?;
         Ok(())
     }
 
@@ -316,18 +303,60 @@ impl Storage {
     /// Upsert a file's metadata row (D6).
     pub fn update_file_hash(&self, file_path: &Path, meta: &FileMeta) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute(
-            queries::UPSERT_FILE_META,
-            params![
-                path_to_str(file_path),
-                meta.content_hash,
-                meta.mtime as i64,
-                meta.file_size as i64,
-                meta.language.as_str(),
-                meta.chunk_count as i64,
-            ],
-        )?;
+        update_file_hash_on(&conn, file_path, meta)?;
         Ok(())
+    }
+
+    /// Run `each` over `items` inside ONE outer transaction, isolating every item in its own
+    /// SAVEPOINT so a single item's error rolls back only that item — never the survivors already
+    /// written in the same outer transaction (Decision Log **D20**, plan §3.2.2). This amortizes the
+    /// per-item commit/fsync that the autocommit [`Storage::insert_chunks`]/
+    /// [`Storage::update_file_hash`] pay (the indexer batches a whole run's per-file writes here),
+    /// while preserving D2 per-file error isolation.
+    ///
+    /// For each `item`, in order: open a savepoint, run `each(&writer, item)` — whose writes through
+    /// `writer` participate in that savepoint —
+    /// * `Ok(())` ⇒ RELEASE the savepoint (the item's writes persist within the outer tx);
+    /// * `Err(e)` ⇒ ROLLBACK TO the savepoint (discard the item's partial writes), record `Err(e)`,
+    ///   and CONTINUE to the next item.
+    ///
+    /// After all items, COMMIT the outer transaction once — committing every survivor atomically.
+    /// Returns `Ok(per_item)` with one inner [`Result`] per input item (same order, same length).
+    /// The OUTER `Result` is `Err` only for a non-isolatable failure: the outer begin/commit, a
+    /// savepoint begin/release/rollback, or a poisoned lock ([`StorageError::LockPoisoned`]).
+    ///
+    /// `BatchWriter` borrows the open transaction over the SAME shared connection (**D8**); `each`
+    /// must NOT re-lock `Storage` (that would deadlock the single `Mutex<Connection>`).
+    pub fn write_in_transaction<T, F>(&self, items: &[T], mut each: F) -> Result<Vec<Result<()>>>
+    where
+        F: FnMut(&BatchWriter<'_>, &T) -> Result<()>,
+    {
+        let mut conn = self.lock()?;
+        let mut tx = conn.transaction()?;
+        let mut per_item = Vec::with_capacity(items.len());
+        for item in items {
+            let mut sp = tx.savepoint()?;
+            let outcome = {
+                let writer = BatchWriter { conn: &sp };
+                each(&writer, item)
+            };
+            match outcome {
+                Ok(()) => {
+                    // RELEASE: fold the item's writes into the outer transaction.
+                    sp.commit()?;
+                    per_item.push(Ok(()));
+                }
+                Err(e) => {
+                    // ROLLBACK TO: discard only this item's partial writes, then RELEASE the now-empty
+                    // savepoint so the marker does not linger. A failure here is non-isolatable.
+                    sp.rollback()?;
+                    sp.commit()?;
+                    per_item.push(Err(e));
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(per_item)
     }
 
     /// Read one `index_state` value by key.
@@ -347,6 +376,90 @@ impl Storage {
         conn.execute(queries::SET_INDEX_STATE, params![key, value])?;
         Ok(())
     }
+}
+
+/// The per-item write surface lent by [`Storage::write_in_transaction`] (Decision Log **D20**).
+///
+/// Each method runs against the CURRENT savepoint by borrowing the open transaction's connection
+/// (a [`Savepoint`](rusqlite::Savepoint) derefs to [`Connection`]). It therefore shares the single
+/// `Arc<Mutex<Connection>>` (**D8**) without re-locking it — calling these inside the
+/// `write_in_transaction` closure does not deadlock. The methods mirror the autocommit
+/// [`Storage`] methods of the same name, but their writes participate in the active savepoint
+/// rather than committing on their own.
+pub struct BatchWriter<'a> {
+    conn: &'a Connection,
+}
+
+impl BatchWriter<'_> {
+    /// Insert `chunks` into `symbols`, scoped to the current savepoint (transactional sibling of
+    /// [`Storage::insert_chunks`]).
+    pub fn insert_chunks(&self, chunks: &[Chunk]) -> Result<()> {
+        insert_chunks_on(self.conn, chunks)
+    }
+
+    /// Delete every `symbols` row for `file_path`, scoped to the current savepoint (transactional
+    /// sibling of [`Storage::delete_chunks_for_file`]).
+    pub fn delete_chunks_for_file(&self, file_path: &Path) -> Result<()> {
+        delete_chunks_for_file_on(self.conn, file_path)
+    }
+
+    /// Upsert `file_path`'s `files_metadata` row, scoped to the current savepoint (transactional
+    /// sibling of [`Storage::update_file_hash`]).
+    pub fn update_file_hash(&self, file_path: &Path, meta: &FileMeta) -> Result<()> {
+        update_file_hash_on(self.conn, file_path, meta)
+    }
+}
+
+/// Insert `chunks` into the `symbols` table over `conn` (no transaction control of its own — the
+/// caller owns the transaction/savepoint). Shared by the autocommit [`Storage::insert_chunks`] and
+/// the transactional [`BatchWriter::insert_chunks`] so both write the exact same rows.
+fn insert_chunks_on(conn: &Connection, chunks: &[Chunk]) -> Result<()> {
+    let mut stmt = conn.prepare_cached(queries::INSERT_CHUNK)?;
+    for c in chunks {
+        stmt.execute(params![
+            c.symbol_name,
+            c.symbol_type.as_str(),
+            c.chunk_text,
+            c.parent_symbol,
+            c.imports.join("\n"),
+            c.cross_references.join("\n"),
+            c.file_docstring,
+            path_to_str(&c.file_path),
+            c.start_byte as i64,
+            c.end_byte as i64,
+            c.start_line as i64,
+            c.end_line as i64,
+            c.language.as_str(),
+        ])?;
+    }
+    Ok(())
+}
+
+/// Delete every `symbols` row for `file_path` over `conn`. Shared by the autocommit and
+/// transactional `delete_chunks_for_file` paths.
+fn delete_chunks_for_file_on(conn: &Connection, file_path: &Path) -> Result<()> {
+    conn.execute(
+        queries::DELETE_CHUNKS_FOR_FILE,
+        params![path_to_str(file_path)],
+    )?;
+    Ok(())
+}
+
+/// Upsert `file_path`'s `files_metadata` row over `conn` (D6). Shared by the autocommit and
+/// transactional `update_file_hash` paths.
+fn update_file_hash_on(conn: &Connection, file_path: &Path, meta: &FileMeta) -> Result<()> {
+    conn.execute(
+        queries::UPSERT_FILE_META,
+        params![
+            path_to_str(file_path),
+            meta.content_hash,
+            meta.mtime as i64,
+            meta.file_size as i64,
+            meta.language.as_str(),
+            meta.chunk_count as i64,
+        ],
+    )?;
+    Ok(())
 }
 
 /// Lossy-free conversion of a path to the text we store. Uses `to_string_lossy`; on the target

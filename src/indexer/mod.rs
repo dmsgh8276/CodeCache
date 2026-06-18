@@ -84,7 +84,7 @@ impl Indexer {
 
         // (2)+(3): re-index only the changed/new files; unchanged files take the no-write skip path.
         let changed = pipeline::detect_changed_files(&self.storage, &discovered)?;
-        let mut stats = self.reindex_each(&changed);
+        let mut stats = self.reindex_each(&changed)?;
 
         // (4): reconcile deletions — drop chunks + metadata for files no longer on disk.
         let on_disk: std::collections::HashSet<PathBuf> = discovered.into_iter().collect();
@@ -126,7 +126,7 @@ impl Indexer {
         let start = std::time::Instant::now();
 
         let changed = pipeline::detect_changed_files(&self.storage, files)?;
-        let mut stats = self.reindex_each(&changed);
+        let mut stats = self.reindex_each(&changed)?;
 
         self.restamp_index_state()?;
 
@@ -134,23 +134,59 @@ impl Indexer {
         Ok(stats)
     }
 
-    /// Re-index each file in `files` (delete-first to avoid duplicates), accumulating an
-    /// [`IndexStats`] of files/chunks actually written. D2: a per-file failure is skipped, not
-    /// propagated. `duration_ms` is left zero here — the public entry point stamps wall-clock time.
-    fn reindex_each(&mut self, files: &[PathBuf]) -> IndexStats {
+    /// Re-index each file in `files` (delete-first to avoid duplicates) through ONE outer
+    /// transaction with a SAVEPOINT per file (Decision Log **D20**), accumulating an [`IndexStats`]
+    /// of files/chunks actually written. `files` holds only changed/new files (the caller runs
+    /// `detect_changed_files` first), so an unchanged file never opens a savepoint or re-stamps its
+    /// metadata — preserving the no-write idempotency guarantee inside the batch.
+    ///
+    /// **D2 isolation under batching:** each file's per-file work runs inside its own savepoint; a
+    /// failing file (read/parse/chunk/store) rolls back ONLY its savepoint and is counted-as-skipped,
+    /// while the committed siblings survive the single outer commit. `duration_ms` is left zero here
+    /// — the public entry point stamps wall-clock time.
+    ///
+    /// # Errors
+    /// Returns [`IndexError`] only for a non-isolatable storage failure (the outer begin/commit, a
+    /// savepoint begin/release/rollback, or a poisoned lock); a single file's error is isolated.
+    fn reindex_each(&mut self, files: &[PathBuf]) -> Result<IndexStats, IndexError> {
+        // Per-file chunk counts captured out-of-band: `write_in_transaction` hands back one
+        // `Result<()>` per file (which committed, which rolled back), and `chunk_counts[i]` is the
+        // count `reindex_file_batched` inserted for file i — summed only for the committed files.
+        // The closure runs once per file in order, so a running cursor keys each count by position.
+        //
+        // The closure's error type is the storage layer's `StorageError` (the primitive's contract),
+        // but the per-file pipeline fails with `IndexError`. We map any per-file `IndexError` into a
+        // `StorageError` purely as the savepoint rollback signal — its value is discarded (D2 just
+        // counts the file as skipped), so no detail is lost that the indexer surfaces.
+        let parser = &mut self.parser;
+        let mut chunk_counts = vec![0usize; files.len()];
+        let mut cursor = 0usize;
+        let per_item = self
+            .storage
+            .write_in_transaction(files, |writer, file| {
+                // Bind this call's slot up front (one `each` call per file, in order) so a per-file
+                // `Err` does not misalign later files' counts; a failed file simply keeps its 0.
+                let slot = cursor;
+                cursor += 1;
+                match pipeline::reindex_file_batched(parser, writer, file) {
+                    Ok(count) => {
+                        chunk_counts[slot] = count;
+                        Ok(())
+                    }
+                    Err(e) => Err(index_error_as_storage_signal(e)),
+                }
+            })
+            .map_err(IndexError::Storage)?;
+
         let mut stats = IndexStats::default();
-        for file in files {
-            match pipeline::reindex_file(&mut self.parser, &self.storage, file) {
-                Ok(chunk_count) => {
-                    stats.files_processed += 1;
-                    stats.chunks_indexed += chunk_count;
-                }
-                Err(_skipped) => {
-                    // Degrade-and-continue: the malformed/unreadable file is dropped from the run.
-                }
+        for (i, item) in per_item.iter().enumerate() {
+            if item.is_ok() {
+                stats.files_processed += 1;
+                stats.chunks_indexed += chunk_counts[i];
             }
+            // D2 degrade-and-continue: a failed file's savepoint was rolled back; it is not counted.
         }
-        stats
+        Ok(stats)
     }
 
     /// Re-stamp `index_state` `total_files`/`total_chunks` to the current DB-wide totals
@@ -180,6 +216,20 @@ impl Indexer {
             .set_index_state("total_chunks", &total_chunks.to_string())
             .map_err(IndexError::Storage)?;
         Ok(())
+    }
+}
+
+/// Map a per-file [`IndexError`] into a [`StorageError`](crate::storage::StorageError) to use as the
+/// savepoint-rollback signal inside [`Storage::write_in_transaction`](crate::storage::Storage::write_in_transaction)
+/// (Decision Log **D20**). The primitive's closure error type is the storage layer's, but the
+/// per-file pipeline fails with `IndexError`; an `IndexError::Storage` carries the real storage
+/// error through unchanged, and the other per-file (read/parse/chunk/hash) failures — which must
+/// still roll the file's savepoint back — are wrapped so the file is counted-as-skipped (D2). The
+/// returned value is never surfaced by the indexer (the old `reindex_each` discarded the error too).
+fn index_error_as_storage_signal(err: IndexError) -> crate::storage::StorageError {
+    match err {
+        IndexError::Storage(e) => e,
+        other => crate::storage::StorageError::BatchItem(other.to_string()),
     }
 }
 

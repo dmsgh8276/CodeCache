@@ -46,9 +46,29 @@ is cheaply `Clone`-able and the MCP server can lend one connection to `Retriever
   normally); a non-finite weight (NaN/±inf) is rejected as `StorageError::NonFiniteWeight` (defensive —
   the CLI validates first) rather than emitted into SQL. Ordering invariant unchanged (`bm25 ASC, rowid
   ASC`); reuses `map_search_row`/`RawSearchRow`.
+- **D20 addition** (cold-index batching, plan §3.2.2): `write_in_transaction<T, F>(items: &[T], each:
+  F) -> Result<Vec<Result<()>>>` where `F: FnMut(&BatchWriter<'_>, &T) -> Result<()>` — runs `each`
+  once per item inside **one outer `conn.transaction()`** (the connection is locked ONCE — D8), each
+  item wrapped in its own **SAVEPOINT** (`tx.savepoint()`): on `Ok` the savepoint is RELEASED (commit),
+  on `Err` it is ROLLED BACK TO (the item's partial writes discarded) then released and the `Err`
+  recorded, and the batch CONTINUES. The outer tx commits once. Returns one inner `Result` per item
+  (same order/length); the OUTER `Result` is `Err` only for a non-isolatable failure (outer begin/
+  commit, poisoned lock). This amortizes ~N per-file commit fsyncs (the old per-file
+  `insert_chunks`+autocommit `update_file_hash`/`delete_chunks_for_file`) into ONE commit — the D20
+  10K-cold-index fix — while keeping **D2 per-file isolation** (one item's DB error rolls back only
+  that item). The indexer drives the delete-first → insert → upsert per-file unit through it.
+  - `BatchWriter<'a>` lends `insert_chunks`/`delete_chunks_for_file`/`update_file_hash`, each executing
+    against the CURRENT savepoint by borrowing the open transaction (a `rusqlite::Savepoint` derefs to
+    `Connection`) — it does NOT re-lock `Storage` (no re-entrant-lock deadlock, D8). The autocommit
+    `insert_chunks`/`delete_chunks_for_file`/`update_file_hash` stay for single-shot callers (e.g.
+    `app::ingest_chunks`); both paths delegate to shared private `*_on(&Connection, …)` helpers so the
+    rows written are byte-identical whether autocommit or savepoint.
 - `SearchResult { chunk, bm25_score }`. `StorageError::{Sqlite, LockPoisoned, CorruptRow,
-  NonFiniteWeight}` (typed, impl `std::error::Error`; no reachable panic — poisoned lock, unknown
-  stored enum, and a non-finite BM25 weight are all typed errors).
+  NonFiniteWeight, BatchItem}` (typed, impl `std::error::Error`; no reachable panic — poisoned lock,
+  unknown stored enum, a non-finite BM25 weight, and a rolled-back batch item are all typed errors).
+  **D20** added `BatchItem(String)`: the storage-layer signal a `write_in_transaction` item maps a
+  non-storage per-item failure into so its savepoint rolls back; carries the underlying error's
+  description and is never surfaced to the user (the indexer just counts the file skipped, D2).
 
 ## Schema / FTS5 notes (`schema.rs`, `queries.rs`)
 - Default (contentful) FTS5 `symbols` table — **D11** drops the invalid `content='symbols'` from
@@ -69,3 +89,9 @@ is cheaply `Clone`-able and the MCP server can lend one connection to `Retriever
 **R2.2a / D24 (2026-06-14):** `search_with_weights` added (per-column BM25 override; `search`
 delegates with `None`). +4 storage tests (reorder / default-identical / determinism / zero-negative
 edge); all 25 storage tests green; all four gates clean (Rust 1.85).
+**D20 (2026-06-17):** `write_in_transaction` + `BatchWriter` savepoint primitive added (cold-index
+batching; `insert_chunks`/`delete_chunks_for_file`/`update_file_hash` refactored onto shared `*_on`
+helpers so autocommit + savepoint write identical rows); `StorageError::BatchItem`. +3 storage tests
+(`write_in_transaction_*`: happy-path commit-all, mid-batch savepoint isolation, failed-first-item
+survivor commit). All four gates clean (Rust 1.85); reviewer APPROVED. Brief:
+[`.claude/briefs/BRIEF-M10-D20-batch-inserts.md`](../../.claude/briefs/BRIEF-M10-D20-batch-inserts.md).

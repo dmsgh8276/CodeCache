@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use codecache::storage::Storage;
+use codecache::storage::{Storage, StorageError};
 use codecache::types::{Chunk, FileMeta, Language, SymbolType};
 
 // ───────────────────────── M8.3 / D19 — `symbols_for_path` skeleton helpers ─────────────────────────
@@ -241,6 +241,183 @@ fn bulk_insert_many_chunks_expects_all_present() {
         .search("shared_marker_term", 100)
         .expect("search all");
     assert_eq!(results.len(), 50, "all 50 chunks present");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// M10 / D20 — batch indexer inserts: savepoint-per-item isolation inside ONE outer transaction.
+//
+// The D20 fix amortizes the indexer's per-file commit/fsync overhead by batching every per-file
+// write across an index run into a SINGLE outer transaction — while PRESERVING D2 per-file error
+// isolation via a SAVEPOINT per item: one item's DB error must roll back ONLY that item, not the
+// good items already written in the same outer transaction.
+//
+// These tests fail to COMPILE today — `Storage::write_in_transaction` and the `BatchWriter` it
+// lends do not exist yet. That compile error IS the RED state; the GREEN target is the eng lead's.
+//
+// PINNED CONTRACT (the tests are the spec; the eng lead must honor this exact shape — though the
+// internal SQL/SAVEPOINT plumbing is theirs):
+//   - Signature (on `Storage`):
+//       pub fn write_in_transaction<T, F>(&self, items: &[T], each: F) -> Result<Vec<Result<()>>>
+//       where F: FnMut(&BatchWriter<'_>, &T) -> Result<()>;
+//   - ONE outer transaction wraps the whole call (so the batch pays one commit/fsync). For each
+//     `item` in `items`, in order: open a SAVEPOINT, run `each(writer, item)` — which performs the
+//     item's writes through `writer` so they participate in that savepoint:
+//       * `each` returns Ok(())  ⇒ RELEASE the savepoint (the item's writes persist within the tx);
+//       * `each` returns Err(e)  ⇒ ROLLBACK TO the savepoint (discard the item's partial writes),
+//                                   record Err(e), and CONTINUE to the next item (no abort, no panic).
+//   - After all items, COMMIT the outer transaction once — committing every survivor atomically.
+//   - Returns `Ok(per_item)` where `per_item[i]` is the result of `each` for `items[i]` (same order,
+//     same length). The OUTER `Result` is `Err` only for a non-isolatable failure (e.g. the outer
+//     BEGIN/COMMIT or a poisoned lock) — never for a single item's error.
+//   - `BatchWriter<'_>` lends the per-item write ops the indexer needs, each executing against the
+//     CURRENT savepoint (NOT re-locking the connection — it borrows the open transaction):
+//       pub fn insert_chunks(&self, chunks: &[Chunk]) -> Result<()>;
+//       pub fn delete_chunks_for_file(&self, file_path: &Path) -> Result<()>;
+//       pub fn update_file_hash(&self, file_path: &Path, meta: &FileMeta) -> Result<()>;
+//     (Same semantics as the autocommit `Storage` methods of the same names, but transactional.)
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn write_in_transaction_commits_all_survivors_in_one_batch() {
+    // Happy path: three per-file items, each inserting one chunk through the BatchWriter, all Ok.
+    // Every item's chunk must be searchable after the single outer commit, and every per-item
+    // result must be Ok — i.e. batching does not drop or reorder successful writes.
+    let (_dir, storage) = fresh_storage();
+
+    let files = vec!["a.py", "b.py", "c.py"];
+    let per_item = storage
+        .write_in_transaction(&files, |writer, file| {
+            let name = file.trim_end_matches(".py");
+            writer.insert_chunks(&[chunk(
+                file,
+                name,
+                &format!("def {name}():\n    return batch_marker_term"),
+            )])
+        })
+        .expect("outer transaction must commit (no non-isolatable failure)");
+
+    assert_eq!(
+        per_item.len(),
+        3,
+        "one per-item result per input item, in order"
+    );
+    assert!(
+        per_item.iter().all(std::result::Result::is_ok),
+        "all three items succeeded, so every per-item result is Ok, got {per_item:?}"
+    );
+
+    let hits = storage
+        .search("batch_marker_term", 100)
+        .expect("search batched chunks");
+    let mut names: Vec<String> = hits.into_iter().map(|h| h.chunk.symbol_name).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        "all three batched chunks committed atomically in one outer transaction"
+    );
+}
+
+#[test]
+fn write_in_transaction_isolates_one_items_db_error_via_savepoint() {
+    // THE LOAD-BEARING D20 GUARANTEE. A three-item batch where the MIDDLE item fails AFTER it has
+    // already written a chunk inside its savepoint. The savepoint must roll that partial write back
+    // so it never reaches search, while the FIRST and THIRD items (good) still commit in the SAME
+    // outer transaction. This is exactly what a naive single outer transaction (rollback-all on any
+    // error) would get WRONG — and what the savepoint-per-item design must get right.
+    let (_dir, storage) = fresh_storage();
+
+    // Marker shared by every chunk so one search surfaces whichever items survived the batch.
+    let body = "def stub():\n    return savepoint_marker_term";
+    let items = vec!["good_first.py", "doomed_middle.py", "good_last.py"];
+
+    let per_item = storage
+        .write_in_transaction(&items, |writer, file| {
+            let name = file.trim_end_matches(".py");
+            // Every item writes a chunk FIRST (so the doomed item has an in-savepoint partial write).
+            writer.insert_chunks(&[chunk(file, name, body)])?;
+            // The middle item then fails — its just-written chunk must be rolled back to the
+            // savepoint, not committed, while the other items' writes survive.
+            if *file == "doomed_middle.py" {
+                return Err(StorageError::CorruptRow(
+                    "synthetic mid-savepoint per-item failure (D20 isolation probe)".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .expect(
+            "the outer transaction must still commit despite one item's error (D2 under batching)",
+        );
+
+    // Per-item results: good, err, good — in order. The batch did NOT abort on the middle error.
+    assert_eq!(per_item.len(), 3, "one per-item result per item");
+    assert!(
+        per_item[0].is_ok(),
+        "first (good) item committed: {per_item:?}"
+    );
+    assert!(
+        per_item[1].is_err(),
+        "the doomed middle item's per-item result is Err, surfaced not swallowed: {per_item:?}"
+    );
+    assert!(
+        per_item[2].is_ok(),
+        "third (good) item committed: {per_item:?}"
+    );
+
+    // Observable DB state: ONLY the two good items' chunks are searchable; the doomed item's
+    // partial write was rolled back to its savepoint.
+    let hits = storage
+        .search("savepoint_marker_term", 100)
+        .expect("search after isolated-failure batch");
+    let mut names: Vec<String> = hits.into_iter().map(|h| h.chunk.symbol_name).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["good_first".to_string(), "good_last".to_string()],
+        "the failed item's in-savepoint write is rolled back; the good siblings stay committed"
+    );
+}
+
+#[test]
+fn write_in_transaction_failed_item_does_not_discard_committed_siblings() {
+    // A sharper restatement of the savepoint guarantee against the naive-rollback failure mode: even
+    // when the FIRST item fails, the LATER good items must still commit (a naive `?`-on-error inside
+    // one transaction would either abort before they ran or roll the whole tx back). After the batch,
+    // exactly the surviving items are present — the failing item contributes nothing.
+    let (_dir, storage) = fresh_storage();
+
+    let body = "def stub():\n    return order_marker_term";
+    let items = vec!["doomed_first.py", "good_second.py", "good_third.py"];
+
+    let per_item = storage
+        .write_in_transaction(&items, |writer, file| {
+            let name = file.trim_end_matches(".py");
+            writer.insert_chunks(&[chunk(file, name, body)])?;
+            if *file == "doomed_first.py" {
+                return Err(StorageError::CorruptRow(
+                    "synthetic first-item failure".to_string(),
+                ));
+            }
+            Ok(())
+        })
+        .expect("outer transaction commits the survivors even when the first item fails");
+
+    assert!(per_item[0].is_err(), "first item failed: {per_item:?}");
+    assert!(
+        per_item[1].is_ok() && per_item[2].is_ok(),
+        "later items committed: {per_item:?}"
+    );
+
+    let hits = storage
+        .search("order_marker_term", 100)
+        .expect("search after first-item-failure batch");
+    let mut names: Vec<String> = hits.into_iter().map(|h| h.chunk.symbol_name).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["good_second".to_string(), "good_third".to_string()],
+        "a failing first item must NOT discard the good items committed later in the same batch"
+    );
 }
 
 #[test]

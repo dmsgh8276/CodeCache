@@ -267,8 +267,25 @@ query **p95 < 500ms** on 100K LOC (§1.3/§11.2). Token estimate = §6.3 char he
             `SCAN symbols VIRTUAL TABLE INDEX 0:M13` (FTS5 index used, no full scan) + bounded
             `USE TEMP B-TREE FOR ORDER BY` on bm25; UNINDEXED cols returned with no extra lookup
             (D7/D11). Verbatim plan + read in `benches/CLAUDE.md`. → perf + specialist
-      - [ ] **v0.1.x follow-up (D20):** batch indexer inserts across files into one transaction
-            (preserve D2 per-file isolation), re-measure 10K cold index < 5 s → engineering-lead (test-first)
+      - [x] **v0.1.x follow-up (D20) — DONE 2026-06-17 (test-first; reviewer-APPROVED; UNCOMMITTED at
+            hand-off, main session commits).** Additive `Storage::write_in_transaction<T,F>(items, each)
+            -> Result<Vec<Result<()>>>` (plan §3.2.2): the indexer's per-file work runs inside **one
+            outer transaction**, each file in its own **SAVEPOINT** (Ok⇒RELEASE, Err⇒ROLLBACK TO +
+            skip-count + CONTINUE), one outer commit. `BatchWriter<'a>` lends `insert_chunks`/
+            `delete_chunks_for_file`/`update_file_hash` over the same D8 connection (no re-lock).
+            `index_all`/`update_files` rewired onto it; `detect_changed_files` still runs first so
+            unchanged files open no savepoint (idempotency held). **D2 preserved naturally** (parse/read/
+            DB-stage per-file failure rolls back only that file; batch returns Ok; siblings commit) —
+            RED tests at both the storage primitive (`storage_tests::write_in_transaction_*`, savepoint
+            isolation) and indexer (`indexer_tests::unreadable_file_mid_batch_…`, read-stage D2) surfaces;
+            no existing test weakened. One additive internal `StorageError::BatchItem(String)` (never
+            surfaced). **228 tests** green (224 baseline + 4 new), all four gates clean (Rust 1.85).
+            **Measured (this WSL2/Linux machine, release):** 10K cold-index p50 **5.84 s → 1.37 s
+            (−76.5%)**, p95 1.57 s — well under < 5 s here. **Windows CI remains the authoritative budget
+            gate** (the `benches/CLAUDE.md` table stays MISS-on-Win11-pending until a Windows run
+            confirms < 5 s; the ≈200-fsyncs→1 mechanism is platform-independent). → engineering-lead
+            (impl) + perf (measure) + reviewer (APPROVE). Brief:
+            `.claude/briefs/BRIEF-M10-D20-batch-inserts.md`; ROADMAP D20 → RESOLVED.
 - [x] **M10.2 D16 Layer-1 retrieval-quality scoring** (replaces the 5-task token-reduction benchmark)
       → perf. **DONE 2026-06-12.** Deterministic offline scorer `tests/retrieval_quality.rs`
       (Recall@k/Precision@k/F1@k at file + block(function) granularity; metric math unit-tested

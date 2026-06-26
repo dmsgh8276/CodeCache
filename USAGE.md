@@ -12,7 +12,7 @@ it from the terminal, and wiring it into an AI coding agent as an MCP tool.
 CodeCache is a single Rust binary. It parses your code into semantic units (functions, classes,
 methods) with Tree-sitter, indexes them in SQLite + FTS5, and at query time returns only the
 relevant, token-budgeted snippets — so an agent does one structured lookup instead of N rounds of
-grep. No embedding model, no vector DB, no language server, no cloud account. It works air-gapped.
+grep. No embedding model, no vector DB, no language server, no cloud account.
 
 **v0.1 languages:** Python, TypeScript, Go.
 

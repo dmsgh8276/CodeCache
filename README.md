@@ -20,7 +20,6 @@ keep where a structured index saves the agent turns and tokens.
 > perf/release hardening — Decision Log D20/D30).
 > **v0.1.0 release staged** — Python, TypeScript, Go parsers; AST + BM25 retrieval; MCP stdio server.
 > Milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md); positioning, landscape research, and the R1–R4
-> research track in [`project_overview.md`](project_overview.md).
 
 ## Quickstart (target UX)
 ```bash
